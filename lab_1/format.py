@@ -28,9 +28,11 @@ APIList = List[str]
 Categories = Dict[str, APIList]
 CategoriesLineNumber = Dict[str, int]
 
+
 def error_message(line_number: int, message: str) -> str:
     line = line_number + 1
     return f'(L{line:03d}) {message}'
+
 
 def get_categories_content(contents: List[str]) -> Tuple[Categories, CategoriesLineNumber]:
 
@@ -59,6 +61,7 @@ def get_categories_content(contents: List[str]) -> Tuple[Categories, CategoriesL
 
     return (categories, category_line_num)
 
+
 def check_alphabetical_order(lines: List[str]) -> List[str]:
 
     err_msgs = []
@@ -74,6 +77,7 @@ def check_alphabetical_order(lines: List[str]) -> List[str]:
             err_msgs.append(err_msg)
     
     return err_msgs
+
 
 def check_title(line_num: int, raw_title: str) -> List[str]:
 
@@ -93,6 +97,7 @@ def check_title(line_num: int, raw_title: str) -> List[str]:
             err_msgs.append(err_msg)
 
     return err_msgs
+
 
 def check_description(line_num: int, description: str) -> List[str]:
 
@@ -115,6 +120,7 @@ def check_description(line_num: int, description: str) -> List[str]:
     
     return err_msgs
 
+
 def check_auth(line_num: int, auth: str) -> List[str]:
 
     err_msgs = []
@@ -130,6 +136,7 @@ def check_auth(line_num: int, auth: str) -> List[str]:
     
     return err_msgs
 
+
 def check_https(line_num: int, https: str) -> List[str]:
 
     err_msgs = []
@@ -140,6 +147,7 @@ def check_https(line_num: int, https: str) -> List[str]:
 
     return err_msgs
 
+
 def check_cors(line_num: int, cors: str) -> List[str]:
 
     err_msgs = []
@@ -149,6 +157,7 @@ def check_cors(line_num: int, cors: str) -> List[str]:
         err_msgs.append(err_msg)
     
     return err_msgs
+
 
 def check_entry(line_num: int, segments: List[str]) -> List[str]:
 
@@ -173,6 +182,7 @@ def check_entry(line_num: int, segments: List[str]) -> List[str]:
     ]
 
     return err_msgs
+
 
 def check_file_format(lines: List[str]) -> List[str]:
 
@@ -235,6 +245,7 @@ def check_file_format(lines: List[str]) -> List[str]:
     
     return err_msgs
 
+
 def main(filename: str) -> None:
 
     with open(filename, mode='r', encoding='utf-8') as file:
@@ -246,6 +257,7 @@ def main(filename: str) -> None:
         for err_msg in file_format_err_msgs:
             print(err_msg)
         sys.exit(1)
+
 
 if __name__ == '__main__':
 
