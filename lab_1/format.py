@@ -40,8 +40,7 @@ def error_message(line_number: int, message: str) -> str:
     return f'(L{line:03d}) {message}'
 
 
-def get_categories_content(contents: List[str]) ->\
-        Tuple[Categories, CategoriesLineNumber]:
+def get_categories_content(contents: List[str]) -> Tuple[Categories, CategoriesLineNumber]:
     """Извлекает категории и их содержимое из текста."""
     categories = {}
     category_line_num = {}
@@ -53,7 +52,7 @@ def get_categories_content(contents: List[str]) ->\
             category_line_num[category] = line_num
             continue
 
-        if not line_content.startswith('|') or line_content.startswith('|---'):
+        if line_content.startswith('|---') or not line_content.startswith('|'):
             continue
 
         raw_title = [
@@ -76,10 +75,10 @@ def check_alphabetical_order(lines: List[str]) -> List[str]:
     categories, category_line_num = get_categories_content(contents=lines)
 
     for category, api_list in categories.items():
-        if sorted(api_list) != api_list:
+        if api_list != sorted(api_list):
             err_msg = error_message(
                 category_line_num[category],
-                f'{category} category is not alphabetical order'
+                f'Категория "{category}" не отсортирована по алфавиту'
             )
             error_messages.append(err_msg)
 
@@ -92,23 +91,19 @@ def check_title(line_num: int, raw_title: str) -> List[str]:
 
     title_match = LINK_RE.match(raw_title)
 
-    # url should be wrapped in "[TITLE](LINK)" Markdown syntax
     if not title_match:
         err_msg = error_message(
             line_num,
-            'Title syntax should be "[TITLE](LINK)"'
+            'Синтаксис заголовка должен быть "[НАЗВАНИЕ](ССЫЛКА)"'
         )
         error_messages.append(err_msg)
-    else:
-        # do not allow "... API" in the entry title
-        title = title_match.group(1)
-        if title.upper().endswith(' API'):
-            err_msg = error_message(
-                line_num,
-                'Title should not end with '
-                '"... API". Every entry is an API here!'
-            )
-            error_messages.append(err_msg)
+    elif title_match.group(1).upper().endswith(' API'):
+        err_msg = error_message(
+            line_num,
+            'Заголовок не должен заканчиваться на "... API". '
+            'Здесь каждая запись и так является API!'
+        )
+        error_messages.append(err_msg)
 
     return error_messages
 
@@ -117,11 +112,16 @@ def check_description(line_num: int, description: str) -> List[str]:
     """Проверяет корректность описания записи."""
     error_messages = []
 
+    if not description:
+        err_msg = error_message(line_num, 'Описание не может быть пустым')
+        error_messages.append(err_msg)
+        return error_messages
+
     first_char = description[0]
-    if first_char.upper() != first_char:
+    if not first_char.isupper():
         err_msg = error_message(
             line_num,
-            'first character of description is not capitalized'
+            'Первая буква описания должна быть заглавной'
         )
         error_messages.append(err_msg)
 
@@ -129,16 +129,15 @@ def check_description(line_num: int, description: str) -> List[str]:
     if last_char in PUNCTUATION:
         err_msg = error_message(
             line_num,
-            f'description should not end with {last_char}'
+            f'Описание не должно заканчиваться символом "{last_char}"'
         )
         error_messages.append(err_msg)
 
-    desc_length = len(description)
-    if desc_length > MAX_DESCRIPTION_LENGTH:
+    if len(description) > MAX_DESCRIPTION_LENGTH:
         err_msg = error_message(
             line_num,
-            f'description should not exceed {MAX_DESCRIPTION_LENGTH} '
-            f'characters (currently {desc_length})'
+            f'Длина описания не должна превышать {MAX_DESCRIPTION_LENGTH} '
+            f'символов (сейчас: {len(description)})'
         )
         error_messages.append(err_msg)
 
@@ -150,18 +149,21 @@ def check_auth(line_num: int, auth: str) -> List[str]:
     error_messages = []
 
     backtick = '`'
-    if (auth != 'No' and
-            (not auth.startswith(backtick) or not auth.endswith(backtick))):
+
+    # Проверка обратных кавычек для не-"No" значений
+    if auth != 'No' and not (auth.startswith(backtick) and auth.endswith(backtick)):
         err_msg = error_message(
             line_num,
-            'auth value is not enclosed with `backticks`'
+            'Значение Auth должно быть заключено в `обратные кавычки`'
         )
         error_messages.append(err_msg)
 
-    if auth.replace(backtick, '') not in AUTH_KEYS:
+    # Удаляем кавычки для проверки допустимых значений
+    auth_value = auth.strip(backtick)
+    if auth_value not in AUTH_KEYS:
         err_msg = error_message(
             line_num,
-            f'{auth} is not a valid Auth option'
+            f'"{auth}" не является допустимым значением для Auth'
         )
         error_messages.append(err_msg)
 
@@ -175,7 +177,7 @@ def check_https(line_num: int, https: str) -> List[str]:
     if https not in HTTPS_KEYS:
         err_msg = error_message(
             line_num,
-            f'{https} is not a valid HTTPS option'
+            f'"{https}" не является допустимым значением для HTTPS'
         )
         error_messages.append(err_msg)
 
@@ -189,7 +191,7 @@ def check_cors(line_num: int, cors: str) -> List[str]:
     if cors not in CORS_KEYS:
         err_msg = error_message(
             line_num,
-            f'{cors} is not a valid CORS option'
+            f'"{cors}" не является допустимым значением для CORS'
         )
         error_messages.append(err_msg)
 
@@ -204,19 +206,30 @@ def check_entry(line_num: int, segments: List[str]) -> List[str]:
     https = segments[INDEX_HTTPS]
     cors = segments[INDEX_CORS]
 
-    title_err_msgs = check_title(line_num, raw_title)
-    desc_err_msgs = check_description(line_num, description)
-    auth_err_msgs = check_auth(line_num, auth)
-    https_err_msgs = check_https(line_num, https)
-    cors_err_msgs = check_cors(line_num, cors)
+    error_messages = []
 
-    error_messages = [
-        *title_err_msgs,
-        *desc_err_msgs,
-        *auth_err_msgs,
-        *https_err_msgs,
-        *cors_err_msgs
-    ]
+    error_messages.extend(check_title(line_num, raw_title))
+    error_messages.extend(check_description(line_num, description))
+    error_messages.extend(check_auth(line_num, auth))
+    error_messages.extend(check_https(line_num, https))
+    error_messages.extend(check_cors(line_num, cors))
+
+    return error_messages
+
+
+def check_segment_spacing(line_num: int, segment: str) -> List[str]:
+    """Проверяет отступы в сегменте строки."""
+    error_messages = []
+
+    left_spaces = len(segment) - len(segment.lstrip())
+    right_spaces = len(segment) - len(segment.rstrip())
+
+    if left_spaces != 1 or right_spaces != 1:
+        err_msg = error_message(
+            line_num,
+            'Каждый сегмент должен начинаться и заканчиваться ровно одним пробелом'
+        )
+        error_messages.append(err_msg)
 
     return error_messages
 
@@ -226,8 +239,7 @@ def check_file_format(lines: List[str]) -> List[str]:
     error_messages = []
     category_title_in_index = []
 
-    alphabetical_err_msgs = check_alphabetical_order(lines)
-    error_messages.extend(alphabetical_err_msgs)
+    error_messages.extend(check_alphabetical_order(lines))
 
     num_in_category = MIN_ENTRIES_PER_CATEGORY + 1
     category = ''
@@ -238,30 +250,33 @@ def check_file_format(lines: List[str]) -> List[str]:
         if category_title_match:
             category_title_in_index.append(category_title_match.group(1))
 
-        # check each category for the minimum number of entries
+        # Проверка заголовков категорий
         if line_content.startswith(ANCHOR):
             category_match = ANCHOR_RE.match(line_content)
+
             if category_match:
-                if category_match.group(1) not in category_title_in_index:
+                category_name = category_match.group(1)
+                if category_name not in category_title_in_index:
                     err_msg = error_message(
                         line_num,
-                        f'category header ({category_match.group(1)}) '
-                        f'not added to Index section'
+                        f'Заголовок категории "{category_name}" '
+                        f'не добавлен в раздел Index'
                     )
                     error_messages.append(err_msg)
             else:
                 err_msg = error_message(
                     line_num,
-                    'category header is not formatted correctly'
+                    'Заголовок категории имеет неверный формат'
                 )
                 error_messages.append(err_msg)
 
+            # Проверка минимального количества записей в предыдущей категории
             if num_in_category < MIN_ENTRIES_PER_CATEGORY:
                 err_msg = error_message(
                     category_line,
-                    f'{category} category does not have the minimum '
-                    f'{MIN_ENTRIES_PER_CATEGORY} entries '
-                    f'(only has {num_in_category})'
+                    f'Категория "{category}" содержит менее '
+                    f'{MIN_ENTRIES_PER_CATEGORY} записей '
+                    f'(имеется: {num_in_category})'
                 )
                 error_messages.append(err_msg)
 
@@ -270,42 +285,43 @@ def check_file_format(lines: List[str]) -> List[str]:
             num_in_category = 0
             continue
 
-        # skips lines that we do not care about
-        if not line_content.startswith('|') or line_content.startswith('|---'):
+        # Пропускаем ненужные строки
+        if line_content.startswith('|---') or not line_content.startswith('|'):
             continue
 
         num_in_category += 1
         segments = line_content.split('|')[1:-1]
+
         if len(segments) < NUM_SEGMENTS:
             err_msg = error_message(
                 line_num,
-                f'entry does not have all the required columns '
-                f'(have {len(segments)}, need {NUM_SEGMENTS})'
+                f'Запись имеет не все необходимые колонки '
+                f'(имеется: {len(segments)}, требуется: {NUM_SEGMENTS})'
             )
             error_messages.append(err_msg)
             continue
 
+        # Проверка отступов в каждом сегменте
         for segment in segments:
-            # every line segment should start and end with exactly 1 space
-            if (len(segment) - len(segment.lstrip()) != 1
-                    or len(segment) - len(segment.rstrip()) != 1):
-                err_msg = error_message(
-                    line_num,
-                    'each segment must start and end with exactly 1 space'
-                )
-                error_messages.append(err_msg)
+            error_messages.extend(check_segment_spacing(line_num, segment))
 
         segments = [segment.strip() for segment in segments]
-        entry_err_msgs = check_entry(line_num, segments)
-        error_messages.extend(entry_err_msgs)
+        error_messages.extend(check_entry(line_num, segments))
 
     return error_messages
 
 
 def main(filename: str) -> None:
     """Основная функция для проверки файла."""
-    with open(filename, mode='r', encoding='utf-8') as file:
-        lines = list(line.rstrip() for line in file)
+    try:
+        with open(filename, mode='r', encoding='utf-8') as file:
+            lines = [line.rstrip() for line in file]
+    except FileNotFoundError:
+        print(f'Ошибка: файл "{filename}" не найден')
+        sys.exit(1)
+    except UnicodeDecodeError:
+        print(f'Ошибка: файл "{filename}" имеет неверную кодировку')
+        sys.exit(1)
 
     file_format_err_msgs = check_file_format(lines)
 
@@ -314,14 +330,18 @@ def main(filename: str) -> None:
             print(err_msg)
         sys.exit(1)
 
+    print(f'Файл "{filename}" успешно прошел проверку формата')
+
 
 if __name__ == '__main__':
-    num_args = len(sys.argv)
-
-    if num_args < 2:
-        print('No .md file passed (file should contain Markdown table syntax)')
+    if len(sys.argv) < 2:
+        print('Ошибка: не указан файл .md для проверки')
+        print('Использование: python format.py <filename.md>')
         sys.exit(1)
 
     filename = sys.argv[1]
+
+    if not filename.endswith('.md'):
+        print('Предупреждение: рекомендуется использовать файлы с расширением .md')
 
     main(filename)
