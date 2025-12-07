@@ -7,26 +7,26 @@ from typing import List, Tuple, Dict
 
 # Temporary replacement
 # The descriptions that contain () at the end must adapt to the new policy later
-punctuation = punctuation.replace('()', '')
+PUNCTUATION = punctuation.replace('()', '')
 
-anchor = '###'
-auth_keys = ['apiKey', 'OAuth', 'X-Mashape-Key', 'User-Agent', 'No']
-https_keys = ['Yes', 'No']
-cors_keys = ['Yes', 'No', 'Unknown']
+ANCHOR = '###'
+AUTH_KEYS = ['apiKey', 'OAuth', 'X-Mashape-Key', 'User-Agent', 'No']
+HTTPS_KEYS = ['Yes', 'No']
+CORS_KEYS = ['Yes', 'No', 'Unknown']
 
-index_title = 0
-index_desc = 1
-index_auth = 2
-index_https = 3
-index_cors = 4
+INDEX_TITLE = 0
+INDEX_DESC = 1
+INDEX_AUTH = 2
+INDEX_HTTPS = 3
+INDEX_CORS = 4
 
-num_segments = 5
-min_entries_per_category = 3
-max_description_length = 100
+NUM_SEGMENTS = 5
+MIN_ENTRIES_PER_CATEGORY = 3
+MAX_DESCRIPTION_LENGTH = 100
 
-anchor_re = re.compile(anchor + '\s(.+)')
-category_title_in_index_re = re.compile('\*\s\[(.*)\]')
-link_re = re.compile('\[(.+)\]\((http.*)\)')
+ANCHOR_RE = re.compile(ANCHOR + r'\s(.+)')
+CATEGORY_TITLE_IN_INDEX_RE = re.compile(r'\*\s\[(.*)\]')
+LINK_RE = re.compile(r'\[(.+)\]\((http.*)\)')
 
 # Type aliases
 APIList = List[str]
@@ -44,8 +44,8 @@ def get_categories_content(contents: List[str]) -> Tuple[Categories, CategoriesL
     category_line_num = {}
 
     for line_num, line_content in enumerate(contents):
-        if line_content.startswith(anchor):
-            category = line_content.split(anchor)[1].strip()
+        if line_content.startswith(ANCHOR):
+            category = line_content.split(ANCHOR)[1].strip()
             categories[category] = []
             category_line_num[category] = line_num
             continue
@@ -57,16 +57,16 @@ def get_categories_content(contents: List[str]) -> Tuple[Categories, CategoriesL
             raw_content.strip() for raw_content in line_content.split('|')[1:-1]
         ][0]
 
-        title_match = link_re.match(raw_title)
+        title_match = LINK_RE.match(raw_title)
         if title_match:
             title = title_match.group(1).upper()
             categories[category].append(title)
 
-    return (categories, category_line_num)
+    return categories, category_line_num
 
 
 def check_alphabetical_order(lines: List[str]) -> List[str]:
-    err_msgs = []
+    error_messages = []
 
     categories, category_line_num = get_categories_content(contents=lines)
 
@@ -76,20 +76,20 @@ def check_alphabetical_order(lines: List[str]) -> List[str]:
                 category_line_num[category],
                 f'{category} category is not alphabetical order'
             )
-            err_msgs.append(err_msg)
+            error_messages.append(err_msg)
 
-    return err_msgs
+    return error_messages
 
 
 def check_title(line_num: int, raw_title: str) -> List[str]:
-    err_msgs = []
+    error_messages = []
 
-    title_match = link_re.match(raw_title)
+    title_match = LINK_RE.match(raw_title)
 
     # url should be wrapped in "[TITLE](LINK)" Markdown syntax
     if not title_match:
         err_msg = error_message(line_num, 'Title syntax should be "[TITLE](LINK)"')
-        err_msgs.append(err_msg)
+        error_messages.append(err_msg)
     else:
         # do not allow "... API" in the entry title
         title = title_match.group(1)
@@ -98,13 +98,13 @@ def check_title(line_num: int, raw_title: str) -> List[str]:
                 line_num,
                 'Title should not end with "... API". Every entry is an API here!'
             )
-            err_msgs.append(err_msg)
+            error_messages.append(err_msg)
 
-    return err_msgs
+    return error_messages
 
 
 def check_description(line_num: int, description: str) -> List[str]:
-    err_msgs = []
+    error_messages = []
 
     first_char = description[0]
     if first_char.upper() != first_char:
@@ -112,30 +112,30 @@ def check_description(line_num: int, description: str) -> List[str]:
             line_num,
             'first character of description is not capitalized'
         )
-        err_msgs.append(err_msg)
+        error_messages.append(err_msg)
 
     last_char = description[-1]
-    if last_char in punctuation:
+    if last_char in PUNCTUATION:
         err_msg = error_message(
             line_num,
             f'description should not end with {last_char}'
         )
-        err_msgs.append(err_msg)
+        error_messages.append(err_msg)
 
     desc_length = len(description)
-    if desc_length > max_description_length:
+    if desc_length > MAX_DESCRIPTION_LENGTH:
         err_msg = error_message(
             line_num,
-            f'description should not exceed {max_description_length} '
+            f'description should not exceed {MAX_DESCRIPTION_LENGTH} '
             f'characters (currently {desc_length})'
         )
-        err_msgs.append(err_msg)
+        error_messages.append(err_msg)
 
-    return err_msgs
+    return error_messages
 
 
 def check_auth(line_num: int, auth: str) -> List[str]:
-    err_msgs = []
+    error_messages = []
 
     backtick = '`'
     if auth != 'No' and (not auth.startswith(backtick) or not auth.endswith(backtick)):
@@ -143,50 +143,50 @@ def check_auth(line_num: int, auth: str) -> List[str]:
             line_num,
             'auth value is not enclosed with `backticks`'
         )
-        err_msgs.append(err_msg)
+        error_messages.append(err_msg)
 
-    if auth.replace(backtick, '') not in auth_keys:
+    if auth.replace(backtick, '') not in AUTH_KEYS:
         err_msg = error_message(
             line_num,
             f'{auth} is not a valid Auth option'
         )
-        err_msgs.append(err_msg)
+        error_messages.append(err_msg)
 
-    return err_msgs
+    return error_messages
 
 
 def check_https(line_num: int, https: str) -> List[str]:
-    err_msgs = []
+    error_messages = []
 
-    if https not in https_keys:
+    if https not in HTTPS_KEYS:
         err_msg = error_message(
             line_num,
             f'{https} is not a valid HTTPS option'
         )
-        err_msgs.append(err_msg)
+        error_messages.append(err_msg)
 
-    return err_msgs
+    return error_messages
 
 
 def check_cors(line_num: int, cors: str) -> List[str]:
-    err_msgs = []
+    error_messages = []
 
-    if cors not in cors_keys:
+    if cors not in CORS_KEYS:
         err_msg = error_message(
             line_num,
             f'{cors} is not a valid CORS option'
         )
-        err_msgs.append(err_msg)
+        error_messages.append(err_msg)
 
-    return err_msgs
+    return error_messages
 
 
 def check_entry(line_num: int, segments: List[str]) -> List[str]:
-    raw_title = segments[index_title]
-    description = segments[index_desc]
-    auth = segments[index_auth]
-    https = segments[index_https]
-    cors = segments[index_cors]
+    raw_title = segments[INDEX_TITLE]
+    description = segments[INDEX_DESC]
+    auth = segments[INDEX_AUTH]
+    https = segments[INDEX_HTTPS]
+    cors = segments[INDEX_CORS]
 
     title_err_msgs = check_title(line_num, raw_title)
     desc_err_msgs = check_description(line_num, description)
@@ -194,7 +194,7 @@ def check_entry(line_num: int, segments: List[str]) -> List[str]:
     https_err_msgs = check_https(line_num, https)
     cors_err_msgs = check_cors(line_num, cors)
 
-    err_msgs = [
+    error_messages = [
         *title_err_msgs,
         *desc_err_msgs,
         *auth_err_msgs,
@@ -202,28 +202,28 @@ def check_entry(line_num: int, segments: List[str]) -> List[str]:
         *cors_err_msgs
     ]
 
-    return err_msgs
+    return error_messages
 
 
 def check_file_format(lines: List[str]) -> List[str]:
-    err_msgs = []
+    error_messages = []
     category_title_in_index = []
 
     alphabetical_err_msgs = check_alphabetical_order(lines)
-    err_msgs.extend(alphabetical_err_msgs)
+    error_messages.extend(alphabetical_err_msgs)
 
-    num_in_category = min_entries_per_category + 1
+    num_in_category = MIN_ENTRIES_PER_CATEGORY + 1
     category = ''
     category_line = 0
 
     for line_num, line_content in enumerate(lines):
-        category_title_match = category_title_in_index_re.match(line_content)
+        category_title_match = CATEGORY_TITLE_IN_INDEX_RE.match(line_content)
         if category_title_match:
             category_title_in_index.append(category_title_match.group(1))
 
         # check each category for the minimum number of entries
-        if line_content.startswith(anchor):
-            category_match = anchor_re.match(line_content)
+        if line_content.startswith(ANCHOR):
+            category_match = ANCHOR_RE.match(line_content)
             if category_match:
                 if category_match.group(1) not in category_title_in_index:
                     err_msg = error_message(
@@ -231,22 +231,22 @@ def check_file_format(lines: List[str]) -> List[str]:
                         f'category header ({category_match.group(1)}) '
                         f'not added to Index section'
                     )
-                    err_msgs.append(err_msg)
+                    error_messages.append(err_msg)
             else:
                 err_msg = error_message(
                     line_num,
                     'category header is not formatted correctly'
                 )
-                err_msgs.append(err_msg)
+                error_messages.append(err_msg)
 
-            if num_in_category < min_entries_per_category:
+            if num_in_category < MIN_ENTRIES_PER_CATEGORY:
                 err_msg = error_message(
                     category_line,
                     f'{category} category does not have the minimum '
-                    f'{min_entries_per_category} entries '
+                    f'{MIN_ENTRIES_PER_CATEGORY} entries '
                     f'(only has {num_in_category})'
                 )
-                err_msgs.append(err_msg)
+                error_messages.append(err_msg)
 
             category = line_content.split(' ')[1]
             category_line = line_num
@@ -259,13 +259,13 @@ def check_file_format(lines: List[str]) -> List[str]:
 
         num_in_category += 1
         segments = line_content.split('|')[1:-1]
-        if len(segments) < num_segments:
+        if len(segments) < NUM_SEGMENTS:
             err_msg = error_message(
                 line_num,
                 f'entry does not have all the required columns '
-                f'(have {len(segments)}, need {num_segments})'
+                f'(have {len(segments)}, need {NUM_SEGMENTS})'
             )
-            err_msgs.append(err_msg)
+            error_messages.append(err_msg)
             continue
 
         for segment in segments:
@@ -276,13 +276,13 @@ def check_file_format(lines: List[str]) -> List[str]:
                     line_num,
                     'each segment must start and end with exactly 1 space'
                 )
-                err_msgs.append(err_msg)
+                error_messages.append(err_msg)
 
         segments = [segment.strip() for segment in segments]
         entry_err_msgs = check_entry(line_num, segments)
-        err_msgs.extend(entry_err_msgs)
+        error_messages.extend(entry_err_msgs)
 
-    return err_msgs
+    return error_messages
 
 
 def main(filename: str) -> None:
