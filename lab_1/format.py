@@ -35,11 +35,14 @@ CategoriesLineNumber = Dict[str, int]
 
 
 def error_message(line_number: int, message: str) -> str:
+    """Формирует сообщение об ошибке с номером строки."""
     line = line_number + 1
     return f'(L{line:03d}) {message}'
 
 
-def get_categories_content(contents: List[str]) -> Tuple[Categories, CategoriesLineNumber]:
+def get_categories_content(contents: List[str]) ->\
+        Tuple[Categories, CategoriesLineNumber]:
+    """Извлекает категории и их содержимое из текста."""
     categories = {}
     category_line_num = {}
 
@@ -54,7 +57,8 @@ def get_categories_content(contents: List[str]) -> Tuple[Categories, CategoriesL
             continue
 
         raw_title = [
-            raw_content.strip() for raw_content in line_content.split('|')[1:-1]
+            raw_content.strip()
+            for raw_content in line_content.split('|')[1:-1]
         ][0]
 
         title_match = LINK_RE.match(raw_title)
@@ -66,6 +70,7 @@ def get_categories_content(contents: List[str]) -> Tuple[Categories, CategoriesL
 
 
 def check_alphabetical_order(lines: List[str]) -> List[str]:
+    """Проверяет, что записи в каждой категории отсортированы по алфавиту."""
     error_messages = []
 
     categories, category_line_num = get_categories_content(contents=lines)
@@ -82,13 +87,17 @@ def check_alphabetical_order(lines: List[str]) -> List[str]:
 
 
 def check_title(line_num: int, raw_title: str) -> List[str]:
+    """Проверяет корректность заголовка записи."""
     error_messages = []
 
     title_match = LINK_RE.match(raw_title)
 
     # url should be wrapped in "[TITLE](LINK)" Markdown syntax
     if not title_match:
-        err_msg = error_message(line_num, 'Title syntax should be "[TITLE](LINK)"')
+        err_msg = error_message(
+            line_num,
+            'Title syntax should be "[TITLE](LINK)"'
+        )
         error_messages.append(err_msg)
     else:
         # do not allow "... API" in the entry title
@@ -96,7 +105,8 @@ def check_title(line_num: int, raw_title: str) -> List[str]:
         if title.upper().endswith(' API'):
             err_msg = error_message(
                 line_num,
-                'Title should not end with "... API". Every entry is an API here!'
+                'Title should not end with '
+                '"... API". Every entry is an API here!'
             )
             error_messages.append(err_msg)
 
@@ -104,6 +114,7 @@ def check_title(line_num: int, raw_title: str) -> List[str]:
 
 
 def check_description(line_num: int, description: str) -> List[str]:
+    """Проверяет корректность описания записи."""
     error_messages = []
 
     first_char = description[0]
@@ -135,10 +146,12 @@ def check_description(line_num: int, description: str) -> List[str]:
 
 
 def check_auth(line_num: int, auth: str) -> List[str]:
+    """Проверяет корректность поля аутентификации."""
     error_messages = []
 
     backtick = '`'
-    if auth != 'No' and (not auth.startswith(backtick) or not auth.endswith(backtick)):
+    if (auth != 'No' and
+            (not auth.startswith(backtick) or not auth.endswith(backtick))):
         err_msg = error_message(
             line_num,
             'auth value is not enclosed with `backticks`'
@@ -156,6 +169,7 @@ def check_auth(line_num: int, auth: str) -> List[str]:
 
 
 def check_https(line_num: int, https: str) -> List[str]:
+    """Проверяет корректность поля HTTPS."""
     error_messages = []
 
     if https not in HTTPS_KEYS:
@@ -169,6 +183,7 @@ def check_https(line_num: int, https: str) -> List[str]:
 
 
 def check_cors(line_num: int, cors: str) -> List[str]:
+    """Проверяет корректность поля CORS."""
     error_messages = []
 
     if cors not in CORS_KEYS:
@@ -182,6 +197,7 @@ def check_cors(line_num: int, cors: str) -> List[str]:
 
 
 def check_entry(line_num: int, segments: List[str]) -> List[str]:
+    """Проверяет все поля одной записи."""
     raw_title = segments[INDEX_TITLE]
     description = segments[INDEX_DESC]
     auth = segments[INDEX_AUTH]
@@ -206,6 +222,7 @@ def check_entry(line_num: int, segments: List[str]) -> List[str]:
 
 
 def check_file_format(lines: List[str]) -> List[str]:
+    """Проверяет формат всего файла на соответствие стандартам."""
     error_messages = []
     category_title_in_index = []
 
@@ -270,8 +287,8 @@ def check_file_format(lines: List[str]) -> List[str]:
 
         for segment in segments:
             # every line segment should start and end with exactly 1 space
-            if (len(segment) - len(segment.lstrip()) != 1 or
-                    len(segment) - len(segment.rstrip()) != 1):
+            if (len(segment) - len(segment.lstrip()) != 1
+                    or len(segment) - len(segment.rstrip()) != 1):
                 err_msg = error_message(
                     line_num,
                     'each segment must start and end with exactly 1 space'
@@ -286,6 +303,7 @@ def check_file_format(lines: List[str]) -> List[str]:
 
 
 def main(filename: str) -> None:
+    """Основная функция для проверки файла."""
     with open(filename, mode='r', encoding='utf-8') as file:
         lines = list(line.rstrip() for line in file)
 
