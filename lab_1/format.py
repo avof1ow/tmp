@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-from string import punctuation
-from typing import List, Tuple, Dict
 import re
 import sys
+from string import punctuation
+from typing import List, Tuple, Dict
 punctuation = punctuation.replace('()', '')
 anchor = '###'
 auth_keys = ['apiKey', 'OAuth', 'X-Mashape-Key', 'User-Agent', 'No']
