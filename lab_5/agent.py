@@ -85,6 +85,11 @@ class AgentBase:
         self.logger = logger.getChild(self.__class__.__name__)
         self.logger.debug(f"Создан экземпляр {self.__class__.__name__}")
 
+        # Статистика обучения
+        self.train_step = 0
+        self.episode_rewards = []
+        self.recent_rewards = []
+
     def init(self, net_dim, state_dim, action_dim, learning_rate=1e-4):
         """Инициализация агента с логированием критических параметров"""
         try:
@@ -181,11 +186,34 @@ class AgentBase:
         self.state = state
         return trajectory_list
 
-    @staticmethod
-    def optim_update(optimizer, objective):
-        optimizer.zero_grad()
-        objective.backward()
-        optimizer.step()
+    def optim_update(self, optimizer, objective, network_name="network"):
+        """Обновление оптимизатора с логированием градиентов"""
+        try:
+            optimizer.zero_grad()
+            objective.backward()
+
+            # Логирование градиентов перед обновлением
+            total_norm = 0.0
+            max_grad = -float('inf')
+            min_grad = float('inf')
+
+            for param in optimizer.param_groups[0]['params']:
+                if param.grad is not None:
+                    param_norm = param.grad.data.norm(2).item()
+                    total_norm += param_norm ** 2
+                    max_grad = max(max_grad, param.grad.data.max().item())
+                    min_grad = min(min_grad, param.grad.data.min().item())
+
+            grad_norm = total_norm ** 0.5
+            self.logger.debug(f"Градиенты {network_name}: norm={grad_norm:.6f}, "
+                              f"max={max_grad:.6f}, min={min_grad:.6f}")
+
+            optimizer.step()
+            return grad_norm
+
+        except Exception as e:
+            self.logger.error(f"Ошибка при обновлении {network_name}: {str(e)}")
+            raise
 
     @staticmethod
     def soft_update(target_net, current_net, tau):
@@ -202,13 +230,20 @@ class AgentDQN(AgentBase):
         self.logger.info(f"AgentDQN создан: explore_rate={self.explore_rate}")
 
     def select_action(self, state) -> int:  # for discrete action space
-        if rd.rand() < self.explore_rate:  # epsilon-greedy
-            a_int = rd.randint(self.action_dim)  # choosing action randomly
-        else:
-            states = torch.as_tensor((state,), dtype=torch.float32, device=self.device)
-            action = self.act(states)[0]
-            a_int = action.argmax(dim=0).detach().cpu().numpy()
-        return a_int
+        try:
+            if rd.rand() < self.explore_rate:  # epsilon-greedy
+                a_int = rd.randint(self.action_dim)  # choosing action randomly
+                self.logger.debug(f"Случайное действие (epsilon-greedy): {a_int}")
+            else:
+                states = torch.as_tensor((state,), dtype=torch.float32, device=self.device)
+                action = self.act(states)[0]
+                a_int = action.argmax(dim=0).detach().cpu().numpy()
+                q_values = action.detach().cpu().numpy()
+                self.logger.debug(f"Жадное действие: {a_int}, Q-значения: {q_values}")
+            return a_int
+        except Exception as e:
+            self.logger.error(f"Ошибка при выборе действия: {str(e)}")
+            return rd.randint(self.action_dim)
 
     def explore_env(self, env, target_step, reward_scale, gamma) -> list:
         trajectory_list = list()
@@ -225,14 +260,52 @@ class AgentDQN(AgentBase):
         return trajectory_list
 
     def update_net(self, buffer, batch_size, repeat_times, soft_update_tau) -> tuple:
+        self.logger.info(f"Начало обновления сети: buffer={buffer.now_len}, "
+                         f"batch_size={batch_size}, repeat_times={repeat_times}")
+
         buffer.update_now_len()
 
+        if buffer.now_len < batch_size:
+            self.logger.warning(f"Недостаточно данных в буфере: {buffer.now_len} < {batch_size}")
+            return 0.0, 0.0
+
         obj_critic = q_value = None
-        for _ in range(int(buffer.now_len / batch_size * repeat_times)):
+        total_critic_loss = 0.0
+        total_q_value = 0.0
+        update_count = 0
+
+        num_updates = int(buffer.now_len / batch_size * repeat_times)
+        self.logger.info(f"Запланировано обновлений: {num_updates}")
+
+        for i in range(num_updates):
             obj_critic, q_value = self.get_obj_critic(buffer, batch_size)
-            self.optim_update(self.cri_optim, obj_critic)
+
+            # Логирование перед обновлением
+            current_loss = obj_critic.item()
+            current_q = q_value.mean().item()
+            self.logger.debug(f"Итерация {i + 1}/{num_updates}: loss={current_loss:.6f}, "
+                              f"avg_Q={current_q:.6f}")
+
+            grad_norm = self.optim_update(self.cri_optim, obj_critic, "critic")
             self.soft_update(self.cri_target, self.cri, soft_update_tau)
-        return obj_critic.item(), q_value.mean().item()
+
+            total_critic_loss += current_loss
+            total_q_value += current_q
+            update_count += 1
+
+            self.train_step += 1
+            if self.train_step % 100 == 0:
+                self.logger.info(f"Шаг обучения {self.train_step}: "
+                                 f"средний loss={total_critic_loss / update_count:.6f}, "
+                                 f"средний Q={total_q_value / update_count:.6f}")
+
+        avg_loss = total_critic_loss / max(update_count, 1)
+        avg_q = total_q_value / max(update_count, 1)
+
+        self.logger.info(f"Обновление завершено: средний loss={avg_loss:.6f}, "
+                         f"средний Q={avg_q:.6f}, обновлений={update_count}")
+
+        return avg_loss, avg_q
 
     def get_obj_critic(self, buffer, batch_size) -> (torch.Tensor, torch.Tensor):
         with torch.no_grad():
@@ -253,15 +326,25 @@ class AgentDoubleDQN(AgentDQN):
         self.logger.info(f"AgentDoubleDQN создан")
 
     def select_action(self, state) -> int:  # for discrete action space
-        states = torch.as_tensor((state,), dtype=torch.float32, device=self.device)
-        actions = self.act(states)
-        if rd.rand() < self.explore_rate:  # epsilon-greedy
-            a_prob = self.softMax(actions)[0].detach().cpu().numpy()
-            a_int = rd.choice(self.action_dim, p=a_prob)  # choose action according to Q value
-        else:
-            action = actions[0]
-            a_int = action.argmax(dim=0).detach().cpu().numpy()
-        return a_int
+        try:
+            states = torch.as_tensor((state,), dtype=torch.float32, device=self.device)
+            actions = self.act(states)
+
+            if rd.rand() < self.explore_rate:  # epsilon-greedy
+                a_prob = self.softMax(actions)[0].detach().cpu().numpy()
+                a_int = rd.choice(self.action_dim, p=a_prob)
+                self.logger.debug(f"Взвешенное случайное действие: {a_int}, "
+                                  f"вероятности: {a_prob}")
+            else:
+                action = actions[0]
+                a_int = action.argmax(dim=0).detach().cpu().numpy()
+                q_values = action.detach().cpu().numpy()
+                self.logger.debug(f"Жадное действие (DoubleDQN): {a_int}, "
+                                  f"Q-значения: {q_values}")
+            return a_int
+        except Exception as e:
+            self.logger.error(f"Ошибка при выборе действия DoubleDQN: {str(e)}")
+            return rd.randint(self.action_dim)
 
     def get_obj_critic(self, buffer, batch_size) -> (torch.Tensor, torch.Tensor):
         with torch.no_grad():
@@ -270,6 +353,12 @@ class AgentDoubleDQN(AgentDQN):
             q_label = reward + mask * next_q
 
         q1, q2 = [qs.gather(1, action.long()) for qs in self.act.get_q1_q2(state)]
+
+        # Логирование разницы между двумя Q-сетями
+        q_diff = torch.abs(q1 - q2).mean().item()
+        if q_diff > 1.0:  # Если разница большая
+            self.logger.warning(f"Большая разница между Q-сетями: {q_diff:.4f}")
+
         obj_critic = self.criterion(q1, q_label) + self.criterion(q2, q_label)
         return obj_critic, q1
 
@@ -284,25 +373,82 @@ class AgentDDPG(AgentBase):
         self.logger.info(f"AgentDDPG создан: explore_noise={self.explore_noise}")
 
     def select_action(self, state) -> np.ndarray:
-        states = torch.as_tensor((state,), dtype=torch.float32, device=self.device)
-        action = self.act(states)[0]
-        action = (action + torch.randn_like(action) * self.explore_noise).clamp(-1, 1)
-        return action.cpu().numpy()
+        try:
+            states = torch.as_tensor((state,), dtype=torch.float32, device=self.device)
+            action = self.act(states)[0]
+            noise = torch.randn_like(action) * self.explore_noise
+            action = (action + noise).clamp(-1, 1)
+
+            action_np = action.cpu().numpy()
+            noise_np = noise.cpu().numpy()
+
+            self.logger.debug(f"Выбор действия DDPG: действие={action_np}, "
+                              f"шум={noise_np}, норма шума={np.linalg.norm(noise_np):.4f}")
+
+            return action_np
+        except Exception as e:
+            self.logger.error(f"Ошибка при выборе действия DDPG: {str(e)}")
+            return np.random.uniform(-1, 1, self.action_dim)
 
     def update_net(self, buffer, batch_size, repeat_times, soft_update_tau) -> (float, float):
+        self.logger.info(f"Начало обновления DDPG: buffer={buffer.now_len}, "
+                         f"batch_size={batch_size}")
+
         buffer.update_now_len()
 
+        if buffer.now_len < batch_size:
+            self.logger.warning(f"Недостаточно данных в буфере: {buffer.now_len} < {batch_size}")
+            return 0.0, 0.0
+
         obj_critic = obj_actor = None
-        for _ in range(int(buffer.now_len / batch_size * repeat_times)):
+        total_critic_loss = 0.0
+        total_actor_loss = 0.0
+        update_count = 0
+
+        num_updates = int(buffer.now_len / batch_size * repeat_times)
+        self.logger.info(f"Запланировано обновлений DDPG: {num_updates}")
+
+        for i in range(num_updates):
             obj_critic, state = self.get_obj_critic(buffer, batch_size)
-            self.optim_update(self.cri_optim, obj_critic)
+            critic_loss = obj_critic.item()
+
+            # Обновление критической сети
+            critic_grad_norm = self.optim_update(self.cri_optim, obj_critic, "critic")
             self.soft_update(self.cri_target, self.cri, soft_update_tau)
 
+            # Обновление акторской сети
             action_pg = self.act(state)  # policy gradient
             obj_actor = -self.cri(state, action_pg).mean()
-            self.optim_update(self.act_optim, obj_actor)
+            actor_loss = obj_actor.item()
+
+            actor_grad_norm = self.optim_update(self.act_optim, obj_actor, "actor")
             self.soft_update(self.act_target, self.act, soft_update_tau)
-        return obj_actor.item(), obj_critic.item()
+
+            # Логирование
+            self.logger.debug(f"DDPG итерация {i + 1}/{num_updates}: "
+                              f"critic_loss={critic_loss:.6f}, actor_loss={actor_loss:.6f}, "
+                              f"critic_grad_norm={critic_grad_norm:.6f}, "
+                              f"actor_grad_norm={actor_grad_norm:.6f}")
+
+            total_critic_loss += critic_loss
+            total_actor_loss += actor_loss
+            update_count += 1
+
+            self.train_step += 1
+            if self.train_step % 50 == 0:
+                self.logger.info(f"DDPG шаг {self.train_step}: "
+                                 f"critic_loss={total_critic_loss / update_count:.6f}, "
+                                 f"actor_loss={total_actor_loss / update_count:.6f}")
+
+        avg_critic_loss = total_critic_loss / max(update_count, 1)
+        avg_actor_loss = total_actor_loss / max(update_count, 1)
+
+        self.logger.info(f"DDPG обновление завершено: "
+                         f"avg_critic_loss={avg_critic_loss:.6f}, "
+                         f"avg_actor_loss={avg_actor_loss:.6f}, "
+                         f"updates={update_count}")
+
+        return avg_actor_loss, avg_critic_loss
 
     def get_obj_critic(self, buffer, batch_size) -> (torch.Tensor, torch.Tensor):
         with torch.no_grad():
@@ -323,20 +469,62 @@ class AgentTD3(AgentDDPG):
         self.logger.info(f"AgentTD3 создан: policy_noise={self.policy_noise}, update_freq={self.update_freq}")
 
     def update_net(self, buffer, batch_size, repeat_times, soft_update_tau) -> tuple:
+        self.logger.info(f"Начало обновления TD3: buffer={buffer.now_len}")
+
         buffer.update_now_len()
 
-        obj_critic = obj_actor = None
-        for update_c in range(int(buffer.now_len / batch_size * repeat_times)):
-            obj_critic, state = self.get_obj_critic(buffer, batch_size)
-            self.optim_update(self.cri_optim, obj_critic)
+        if buffer.now_len < batch_size:
+            self.logger.warning(f"Недостаточно данных в буфере: {buffer.now_len} < {batch_size}")
+            return 0.0, 0.0
 
-            action_pg = self.act(state)  # policy gradient
-            obj_actor = -self.cri_target(state, action_pg).mean()  # use cri_target instead of cri for stable training
-            self.optim_update(self.act_optim, obj_actor)
-            if update_c % self.update_freq == 0:  # delay update
+        obj_critic = obj_actor = None
+        total_critic_loss = 0.0
+        total_actor_loss = 0.0
+        update_count = 0
+
+        num_updates = int(buffer.now_len / batch_size * repeat_times)
+        self.logger.info(f"Запланировано обновлений TD3: {num_updates}")
+
+        for update_c in range(num_updates):
+            obj_critic, state = self.get_obj_critic(buffer, batch_size)
+            critic_loss = obj_critic.item()
+
+            # Обновление критической сети
+            self.optim_update(self.cri_optim, obj_critic, "critic_twin")
+
+            # Обновление акторской сети
+            action_pg = self.act(state)
+            obj_actor = -self.cri_target(state, action_pg).mean()
+            actor_loss = obj_actor.item()
+
+            self.optim_update(self.act_optim, obj_actor, "actor")
+
+            # Задержанное обновление
+            if update_c % self.update_freq == 0:
                 self.soft_update(self.cri_target, self.cri, soft_update_tau)
                 self.soft_update(self.act_target, self.act, soft_update_tau)
-        return obj_critic.item() / 2, obj_actor.item()
+                self.logger.debug(f"TD3 задержанное обновление на итерации {update_c}")
+
+            # Логирование статистики
+            if update_c % 10 == 0:
+                self.logger.debug(f"TD3 итерация {update_c}: "
+                                  f"critic_loss={critic_loss:.6f}, actor_loss={actor_loss:.6f}")
+
+            total_critic_loss += critic_loss
+            total_actor_loss += actor_loss
+            update_count += 1
+
+            self.train_step += 1
+
+        avg_critic_loss = total_critic_loss / max(update_count, 1) / 2  # /2 для двух критиков
+        avg_actor_loss = total_actor_loss / max(update_count, 1)
+
+        self.logger.info(f"TD3 обновление завершено: "
+                         f"avg_critic_loss={avg_critic_loss:.6f}, "
+                         f"avg_actor_loss={avg_actor_loss:.6f}, "
+                         f"updates={update_count}")
+
+        return avg_critic_loss, avg_actor_loss
 
     def get_obj_critic(self, buffer, batch_size) -> (torch.Tensor, torch.Tensor):
         with torch.no_grad():
@@ -346,7 +534,13 @@ class AgentTD3(AgentDDPG):
             q_label = reward + mask * next_q
 
         q1, q2 = self.cri.get_q1_q2(state, action)
-        obj_critic = self.criterion(q1, q_label) + self.criterion(q2, q_label)  # twin critics
+
+        # Логирование различий между критиками
+        q_diff = torch.abs(q1 - q2).mean().item()
+        if q_diff > 0.5:
+            self.logger.warning(f"Большая разница между критиками TD3: {q_diff:.4f}")
+
+        obj_critic = self.criterion(q1, q_label) + self.criterion(q2, q_label)
         return obj_critic, state
 
 
@@ -359,26 +553,79 @@ class AgentSAC(AgentBase):
         self.logger.info(f"AgentSAC создан")
 
     def select_action(self, state) -> np.ndarray:
-        states = torch.as_tensor((state,), dtype=torch.float32, device=self.device)
-        action = self.act.get_action(states)[0]
-        return action.cpu().numpy()
+        try:
+            states = torch.as_tensor((state,), dtype=torch.float32, device=self.device)
+            action = self.act.get_action(states)[0]
+            action_np = action.cpu().numpy()
+
+            self.logger.debug(f"Выбор действия SAC: действие={action_np}")
+            return action_np
+        except Exception as e:
+            self.logger.error(f"Ошибка при выборе действия SAC: {str(e)}")
+            return np.random.uniform(-1, 1, self.action_dim)
 
     def update_net(self, buffer, batch_size, repeat_times, soft_update_tau) -> tuple:
+        self.logger.info(f"Начало обновления SAC: buffer={buffer.now_len}")
+
         buffer.update_now_len()
 
-        log_alpha = self.act.log_alpha
-        obj_critic = obj_actor = None
-        for update_c in range(int(buffer.now_len / batch_size * repeat_times)):
-            obj_critic, state = self.get_obj_critic(buffer, batch_size, log_alpha.exp())
-            self.optim_update(self.cri_optim, obj_critic)
+        if buffer.now_len < batch_size:
+            self.logger.warning(f"Недостаточно данных в буфере: {buffer.now_len} < {batch_size}")
+            return 0.0, 0.0, -1.0
 
-            action_pg, logprob = self.act.get_action_logprob(state)  # policy gradient
+        log_alpha = self.act.log_alpha
+        total_critic_loss = 0.0
+        total_actor_loss = 0.0
+        alpha_values = []
+        update_count = 0
+
+        num_updates = int(buffer.now_len / batch_size * repeat_times)
+        self.logger.info(f"Запланировано обновлений SAC: {num_updates}")
+
+        for update_c in range(num_updates):
+            obj_critic, state = self.get_obj_critic(buffer, batch_size, log_alpha.exp())
+            critic_loss = obj_critic.item()
+
+            # Обновление критической сети
+            self.optim_update(self.cri_optim, obj_critic, "critic_sac")
+            self.soft_update(self.cri_target, self.cri, soft_update_tau)
+
+            # Обновление акторской сети
+            action_pg, logprob = self.act.get_action_logprob(state)
             obj_actor = (-torch.min(*self.cri_target.get_q1_q2(state, action_pg)).mean()
                          + logprob.mean() * log_alpha.exp().detach()
                          + self.act.get_obj_alpha(logprob))
-            self.optim_update(self.act_optim, obj_actor)
-            self.soft_update(self.cri_target, self.cri, soft_update_tau)
-        return obj_critic.item() / 2, obj_actor.item(), log_alpha.item()
+            actor_loss = obj_actor.item()
+
+            self.optim_update(self.act_optim, obj_actor, "actor_sac")
+
+            # Логирование температуры (alpha)
+            current_alpha = log_alpha.exp().item()
+            alpha_values.append(current_alpha)
+
+            if update_c % 20 == 0:
+                self.logger.debug(f"SAC итерация {update_c}: "
+                                  f"critic_loss={critic_loss:.6f}, actor_loss={actor_loss:.6f}, "
+                                  f"alpha={current_alpha:.6f}, "
+                                  f"avg_logprob={logprob.mean().item():.6f}")
+
+            total_critic_loss += critic_loss
+            total_actor_loss += actor_loss
+            update_count += 1
+
+            self.train_step += 1
+
+        avg_critic_loss = total_critic_loss / max(update_count, 1) / 2
+        avg_actor_loss = total_actor_loss / max(update_count, 1)
+        avg_alpha = np.mean(alpha_values) if alpha_values else -1.0
+
+        self.logger.info(f"SAC обновление завершено: "
+                         f"avg_critic_loss={avg_critic_loss:.6f}, "
+                         f"avg_actor_loss={avg_actor_loss:.6f}, "
+                         f"avg_alpha={avg_alpha:.6f}, "
+                         f"updates={update_count}")
+
+        return avg_critic_loss, avg_actor_loss, avg_alpha
 
     def get_obj_critic(self, buffer, batch_size, alpha) -> (torch.Tensor, torch.Tensor):
         with torch.no_grad():
@@ -387,6 +634,11 @@ class AgentSAC(AgentBase):
             next_q = torch.min(*self.cri_target.get_q1_q2(next_s, next_a))
             q_label = reward + mask * (next_q + next_logprob * alpha)
         q1, q2 = self.cri.get_q1_q2(state, action)  # twin critics
+
+        # Логирование энтропийного бонуса
+        entropy_bonus = (next_logprob * alpha).mean().item()
+        self.logger.debug(f"SAC энтропийный бонус: {entropy_bonus:.6f}")
+
         obj_critic = self.criterion(q1, q_label) + self.criterion(q2, q_label)
         return obj_critic, state
 
@@ -402,9 +654,18 @@ class AgentPPO(AgentBase):
         self.logger.info(f"AgentPPO создан: ratio_clip={self.ratio_clip}, lambda_entropy={self.lambda_entropy}")
 
     def select_action(self, state):
-        states = torch.as_tensor((state,), dtype=torch.float32, device=self.device)
-        actions, noises = self.act.get_action(states)  # plan to be get_action_a_noise
-        return actions[0].detach().cpu().numpy(), noises[0].detach().cpu().numpy()
+        try:
+            states = torch.as_tensor((state,), dtype=torch.float32, device=self.device)
+            actions, noises = self.act.get_action(states)
+
+            action_np = actions[0].detach().cpu().numpy()
+            noise_np = noises[0].detach().cpu().numpy()
+
+            self.logger.debug(f"Выбор действия PPO: действие={action_np}, шум={noise_np}")
+            return action_np, noise_np
+        except Exception as e:
+            self.logger.error(f"Ошибка при выборе действия PPO: {str(e)}")
+            return np.zeros(self.action_dim), np.zeros(self.action_dim)
 
     def explore_env(self, env, target_step, reward_scale, gamma):
         trajectory_list = list()
@@ -421,13 +682,26 @@ class AgentPPO(AgentBase):
         return trajectory_list
 
     def update_net(self, buffer, batch_size, repeat_times, soft_update_tau):
+        self.logger.info(f"Начало обновления PPO: buffer={buffer.now_len}")
+
         buffer.update_now_len()
         buf_len, buf_state, buf_action, buf_r_sum, buf_logprob, buf_advantage = self.prepare_buffer(buffer)
         buffer.empty_buffer()
 
+        self.logger.info(f"PPO подготовка данных: buf_len={buf_len}, "
+                         f"batch_size={batch_size}, repeat_times={repeat_times}")
+
         '''PPO: Surrogate objective of Trust Region'''
-        obj_critic = obj_actor = old_logprob = None
-        for _ in range(int(buf_len / batch_size * repeat_times)):
+        total_critic_loss = 0.0
+        total_actor_loss = 0.0
+        total_entropy = 0.0
+        total_ratio = 0.0
+        update_count = 0
+
+        num_updates = int(buf_len / batch_size * repeat_times)
+        self.logger.info(f"Запланировано эпох PPO: {num_updates}")
+
+        for epoch in range(num_updates):
             indices = torch.randint(buf_len, size=(batch_size,), requires_grad=False, device=self.device)
 
             state = buf_state[indices]
@@ -438,18 +712,59 @@ class AgentPPO(AgentBase):
 
             new_logprob, obj_entropy = self.act.get_new_logprob_entropy(state, action)
             ratio = (new_logprob - old_logprob.detach()).exp()
+
+            # Логирование клиппинга
+            clip_fraction = ((ratio < 1 - self.ratio_clip) | (ratio > 1 + self.ratio_clip)).float().mean().item()
+            if clip_fraction > 0.3:  # Если много клиппинга
+                self.logger.warning(f"Высокий процент клиппинга PPO: {clip_fraction:.2%}")
+
             surrogate1 = advantage * ratio
             surrogate2 = advantage * ratio.clamp(1 - self.ratio_clip, 1 + self.ratio_clip)
             obj_surrogate = -torch.min(surrogate1, surrogate2).mean()
             obj_actor = obj_surrogate + obj_entropy * self.lambda_entropy
-            self.optim_update(self.act_optim, obj_actor)
 
-            value = self.cri(state).squeeze(1)  # critic network predicts the reward_sum (Q value) of state
+            # Обновление актора
+            actor_grad_norm = self.optim_update(self.act_optim, obj_actor, "actor_ppo")
+
+            value = self.cri(state).squeeze(1)
             obj_critic = self.criterion(value, r_sum) / (r_sum.std() + 1e-6)
-            self.optim_update(self.cri_optim, obj_critic)
-            self.soft_update(self.cri_target, self.cri, soft_update_tau) if self.cri_target is not self.cri else None
 
-        return obj_critic.item(), obj_actor.item(), old_logprob.mean().item()  # logging_tuple
+            # Обновление критика
+            critic_grad_norm = self.optim_update(self.cri_optim, obj_critic, "critic_ppo")
+
+            if self.cri_target is not self.cri:
+                self.soft_update(self.cri_target, self.cri, soft_update_tau)
+
+            # Сбор статистики
+            total_critic_loss += obj_critic.item()
+            total_actor_loss += obj_actor.item()
+            total_entropy += obj_entropy.item()
+            total_ratio += ratio.mean().item()
+            update_count += 1
+
+            if epoch % 10 == 0:
+                self.logger.debug(f"PPO эпоха {epoch}: "
+                                  f"critic_loss={obj_critic.item():.6f}, "
+                                  f"actor_loss={obj_actor.item():.6f}, "
+                                  f"entropy={obj_entropy.item():.6f}, "
+                                  f"clip_fraction={clip_fraction:.2%}")
+
+            self.train_step += 1
+
+        # Итоговая статистика
+        avg_critic_loss = total_critic_loss / max(update_count, 1)
+        avg_actor_loss = total_actor_loss / max(update_count, 1)
+        avg_entropy = total_entropy / max(update_count, 1)
+        avg_ratio = total_ratio / max(update_count, 1)
+
+        self.logger.info(f"PPO обновление завершено: "
+                         f"avg_critic_loss={avg_critic_loss:.6f}, "
+                         f"avg_actor_loss={avg_actor_loss:.6f}, "
+                         f"avg_entropy={avg_entropy:.6f}, "
+                         f"avg_ratio={avg_ratio:.4f}, "
+                         f"epochs={update_count}")
+
+        return avg_critic_loss, avg_actor_loss, avg_ratio
 
     def prepare_buffer(self, buffer):
         buf_len = buffer.now_len
@@ -464,6 +779,12 @@ class AgentPPO(AgentBase):
             pre_state = torch.as_tensor((self.state,), dtype=torch.float32, device=self.device)
             pre_r_sum = self.cri(pre_state).detach()
             r_sum, advantage = self.get_reward_sum(buf_len, reward, mask, value, pre_r_sum)
+
+            # Логирование преимуществ
+            adv_mean = advantage.mean().item()
+            adv_std = advantage.std().item()
+            self.logger.info(f"PPO подготовка буфера: преимущество mean={adv_mean:.4f}, std={adv_std:.4f}")
+
         return buf_len, state, action, r_sum, logprob, advantage
 
     def get_reward_sum(self, buf_len, reward, mask, value, pre_r_sum) -> (torch.Tensor, torch.Tensor):
