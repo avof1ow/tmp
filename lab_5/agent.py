@@ -4,6 +4,7 @@ import numpy.random as rd
 from copy import deepcopy
 import logging
 import os
+import traceback
 from datetime import datetime
 from elegantrl2.tutorial.net import QNet, QNetTwin
 from elegantrl2.tutorial.net import Actor, ActorSAC, ActorPPO, ActorDiscretePPO
@@ -60,7 +61,14 @@ def setup_logging(log_level=logging.INFO):
 
 
 # Инициализируем глобальный логгер
-logger = setup_logging()
+try:
+    logger = setup_logging()
+    logger.info("Глобальный логгер успешно инициализирован")
+except Exception as e:
+    print(f"Ошибка при инициализации логирования: {e}")
+    # Создаем минимальный логгер в случае ошибки
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger("RLAgent")
 
 
 class AgentBase:
@@ -75,23 +83,86 @@ class AgentBase:
         self.cri_target = self.if_use_cri_target = None
         self.act_target = self.if_use_act_target = None
         self.logger = logger.getChild(self.__class__.__name__)
+        self.logger.debug(f"Создан экземпляр {self.__class__.__name__}")
 
-    def init(self, net_dim, state_dim, action_dim, learning_rate=1e-4):  # explict call self.init() for multiprocessing
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.action_dim = action_dim
+    def init(self, net_dim, state_dim, action_dim, learning_rate=1e-4):
+        """Инициализация агента с логированием критических параметров"""
+        try:
+            self.logger.info("Начало инициализации агента...")
 
-        self.cri = self.Cri(net_dim, state_dim, action_dim).to(self.device)
-        self.act = self.Act(net_dim, state_dim, action_dim).to(self.device) if self.Act is not None else self.cri
-        self.cri_target = deepcopy(self.cri) if self.if_use_cri_target else self.cri
-        self.act_target = deepcopy(self.act) if self.if_use_act_target else self.act
+            # Определение устройства (CPU/GPU)
+            if torch.cuda.is_available():
+                self.device = torch.device("cuda")
+                gpu_name = torch.cuda.get_device_name(0)
+                self.logger.info(f"Обнаружена GPU: {gpu_name}")
+                self.logger.info(f"CUDA версия: {torch.version.cuda}")
+            else:
+                self.device = torch.device("cpu")
+                self.logger.warning("GPU не обнаружена, используется CPU")
 
-        self.cri_optim = torch.optim.Adam(self.cri.parameters(), learning_rate)
-        self.act_optim = torch.optim.Adam(self.act.parameters(), learning_rate) if self.Act is not None else self.cri
-        del self.Cri, self.Act, self.if_use_cri_target, self.if_use_act_target
+            self.action_dim = action_dim
+            self.logger.info(f"Параметры агента: action_dim={action_dim}, "
+                             f"net_dim={net_dim}, state_dim={state_dim}, lr={learning_rate}")
 
-        self.logger.info(f"Агент инициализирован: device={self.device}, action_dim={action_dim}, "
-                         f"learning_rate={learning_rate}, cri_target={self.cri_target is not self.cri}, "
-                         f"act_target={self.act_target is not self.act}")
+            # Инициализация критической сети
+            self.logger.debug(f"Инициализация критической сети: {self.Cri.__name__}")
+            self.cri = self.Cri(net_dim, state_dim, action_dim).to(self.device)
+
+            # Инициализация акторской сети (если есть)
+            if self.Act is not None:
+                self.logger.debug(f"Инициализация акторской сети: {self.Act.__name__}")
+                self.act = self.Act(net_dim, state_dim, action_dim).to(self.device)
+            else:
+                self.act = self.cri
+                self.logger.debug("Акторская сеть совпадает с критической")
+
+            # Создание целевых сетей (если требуется)
+            if self.if_use_cri_target:
+                self.cri_target = deepcopy(self.cri)
+                self.logger.debug("Создана целевая критическая сеть")
+            else:
+                self.cri_target = self.cri
+                self.logger.debug("Целевая критическая сеть не используется")
+
+            if self.if_use_act_target:
+                self.act_target = deepcopy(self.act)
+                self.logger.debug("Создана целевая акторская сеть")
+            else:
+                self.act_target = self.act
+                self.logger.debug("Целевая акторская сеть не используется")
+
+            # Подсчет параметров сетей
+            cri_params = sum(p.numel() for p in self.cri.parameters())
+            self.logger.info(f"Критическая сеть: {cri_params:,} параметров")
+
+            if self.Act is not None:
+                act_params = sum(p.numel() for p in self.act.parameters())
+                self.logger.info(f"Акторская сеть: {act_params:,} параметров")
+
+            # Инициализация оптимизаторов
+            self.logger.debug("Инициализация оптимизаторов...")
+            self.cri_optim = torch.optim.Adam(self.cri.parameters(), learning_rate)
+
+            if self.Act is not None:
+                self.act_optim = torch.optim.Adam(self.act.parameters(), learning_rate)
+            else:
+                self.act_optim = self.cri
+
+            # Очистка временных атрибутов
+            del self.Cri, self.Act, self.if_use_cri_target, self.if_use_act_target
+
+            # Проверка памяти GPU
+            if self.device.type == 'cuda':
+                total_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+                allocated_memory = torch.cuda.memory_allocated(0) / 1e9
+                self.logger.info(f"GPU память: {allocated_memory:.2f} GB / {total_memory:.2f} GB выделено")
+
+            self.logger.info("Инициализация агента успешно завершена ✓")
+
+        except Exception as e:
+            self.logger.error(f"Ошибка при инициализации агента: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            raise
 
     def select_action(self, state) -> np.ndarray:
         pass  # sample form an action distribution
@@ -429,28 +500,45 @@ class AgentDiscretePPO(AgentPPO):
 
 class ReplayBuffer:
     def __init__(self, max_len, state_dim, action_dim, if_discrete, if_on_policy):
-        self.now_len = 0
-        self.next_idx = 0
-        self.if_full = False
-        self.max_len = max_len
-        self.if_on_policy = if_on_policy
-        self.action_dim = 1 if if_discrete else action_dim
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.logger = logger.getChild("ReplayBuffer")
+        try:
+            self.now_len = 0
+            self.next_idx = 0
+            self.if_full = False
+            self.max_len = max_len
+            self.if_on_policy = if_on_policy
+            self.action_dim = 1 if if_discrete else action_dim
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.logger = logger.getChild("ReplayBuffer")
 
-        if if_on_policy:
-            other_dim = 1 + 1 + self.action_dim + action_dim
-            # other = (reward, mask, action, a_noise) for continuous action
-            # other = (reward, mask, a_int, a_prob) for discrete action
-            self.buf_other = np.empty((max_len, other_dim), dtype=np.float32)
-            self.buf_state = np.empty((max_len, state_dim), dtype=np.float32)
-        else:
-            other_dim = 1 + 1 + self.action_dim
-            self.buf_other = torch.empty((max_len, other_dim), dtype=torch.float32, device=self.device)
-            self.buf_state = torch.empty((max_len, state_dim), dtype=torch.float32, device=self.device)
+            self.logger.info(f"Инициализация ReplayBuffer: max_len={max_len:,}, "
+                             f"state_dim={state_dim}, action_dim={action_dim}, "
+                             f"if_discrete={if_discrete}, if_on_policy={if_on_policy}")
 
-        self.logger.info(f"ReplayBuffer инициализирован: max_len={max_len}, state_dim={state_dim}, "
-                         f"action_dim={action_dim}, if_discrete={if_discrete}, if_on_policy={if_on_policy}")
+            if if_on_policy:
+                other_dim = 1 + 1 + self.action_dim + action_dim
+                # other = (reward, mask, action, a_noise) for continuous action
+                # other = (reward, mask, a_int, a_prob) for discrete action
+                self.buf_other = np.empty((max_len, other_dim), dtype=np.float32)
+                self.buf_state = np.empty((max_len, state_dim), dtype=np.float32)
+                buffer_size_mb = (self.buf_other.nbytes + self.buf_state.nbytes) / (1024 * 1024)
+                self.logger.info(f"On-policy буфер: {buffer_size_mb:.2f} MB")
+            else:
+                other_dim = 1 + 1 + self.action_dim
+                self.buf_other = torch.empty((max_len, other_dim), dtype=torch.float32, device=self.device)
+                self.buf_state = torch.empty((max_len, state_dim), dtype=torch.float32, device=self.device)
+
+                # Расчет занимаемой памяти
+                element_size = self.buf_other.element_size()
+                total_elements = self.buf_other.numel() + self.buf_state.numel()
+                buffer_size_mb = (element_size * total_elements) / (1024 * 1024)
+                self.logger.info(f"Off-policy буфер: {buffer_size_mb:.2f} MB")
+
+            self.logger.info("ReplayBuffer успешно инициализирован ✓")
+
+        except Exception as e:
+            logger.error(f"Критическая ошибка при создании ReplayBuffer: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
 
     def append_buffer(self, state, other):
         self.buf_state[self.next_idx] = state
@@ -483,8 +571,8 @@ class ReplayBuffer:
             state = np.array([item[0] for item in trajectory_list], dtype=np.float32)
             other = np.array([item[1] for item in trajectory_list], dtype=np.float32)
         else:
-            state = torch.as_tensor([item[0] for item in trajectory_list], dtype=torch.float32)  # , device=self.device)
-            other = torch.as_tensor([item[1] for item in trajectory_list], dtype=torch.float32)  # , device=self.device)
+            state = torch.as_tensor([item[0] for item in trajectory_list], dtype=torch.float32)
+            other = torch.as_tensor([item[1] for item in trajectory_list], dtype=torch.float32)
         self.extend_buffer(state, other)
 
     def sample_batch(self, batch_size) -> tuple:  # for off-policy only
