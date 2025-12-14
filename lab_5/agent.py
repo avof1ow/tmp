@@ -2,9 +2,65 @@ import torch
 import numpy as np
 import numpy.random as rd
 from copy import deepcopy
+import logging
+import os
+from datetime import datetime
 from elegantrl2.tutorial.net import QNet, QNetTwin
 from elegantrl2.tutorial.net import Actor, ActorSAC, ActorPPO, ActorDiscretePPO
 from elegantrl2.tutorial.net import Critic, CriticAdv, CriticTwin
+
+
+# Настройка системы логирования
+def setup_logging(log_level=logging.INFO):
+    """Настройка системы логирования для RL агентов"""
+
+    # Создаем директорию для логов, если её нет
+    log_dir = "logs"
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+    # Создаем имя файла с timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"rl_agent_{timestamp}.log")
+
+    # Настраиваем логгер
+    logger = logging.getLogger("RLAgent")
+    logger.setLevel(log_level)
+
+    # Очищаем существующие обработчики (на случай перезапуска)
+    logger.handlers.clear()
+
+    # Форматтер для логов
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    # Обработчик для вывода в файл
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(formatter)
+
+    # Обработчик для вывода в консоль
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(formatter)
+
+    # Добавляем обработчики к логгеру
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    logger.info("=" * 60)
+    logger.info("Система логирования инициализирована")
+    logger.info(f"Логи будут сохраняться в: {log_file}")
+    logger.info(f"Уровень логирования: {logging.getLevelName(log_level)}")
+    logger.info("=" * 60)
+
+    return logger
+
+
+# Инициализируем глобальный логгер
+logger = setup_logging()
 
 
 class AgentBase:
@@ -18,6 +74,7 @@ class AgentBase:
         self.act = self.act_optim = self.Act = None  # self.Act is the class of cri
         self.cri_target = self.if_use_cri_target = None
         self.act_target = self.if_use_act_target = None
+        self.logger = logger.getChild(self.__class__.__name__)
 
     def init(self, net_dim, state_dim, action_dim, learning_rate=1e-4):  # explict call self.init() for multiprocessing
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -31,6 +88,10 @@ class AgentBase:
         self.cri_optim = torch.optim.Adam(self.cri.parameters(), learning_rate)
         self.act_optim = torch.optim.Adam(self.act.parameters(), learning_rate) if self.Act is not None else self.cri
         del self.Cri, self.Act, self.if_use_cri_target, self.if_use_act_target
+
+        self.logger.info(f"Агент инициализирован: device={self.device}, action_dim={action_dim}, "
+                         f"learning_rate={learning_rate}, cri_target={self.cri_target is not self.cri}, "
+                         f"act_target={self.act_target is not self.act}")
 
     def select_action(self, state) -> np.ndarray:
         pass  # sample form an action distribution
@@ -67,6 +128,7 @@ class AgentDQN(AgentBase):
         self.explore_rate = 0.25  # the probability of choosing action randomly in epsilon-greedy
         self.if_use_cri_target = True
         self.Cri = QNet
+        self.logger.info(f"AgentDQN создан: explore_rate={self.explore_rate}")
 
     def select_action(self, state) -> int:  # for discrete action space
         if rd.rand() < self.explore_rate:  # epsilon-greedy
@@ -117,6 +179,7 @@ class AgentDoubleDQN(AgentDQN):
         super().__init__()
         self.softMax = torch.nn.Softmax(dim=1)
         self.Cri = QNetTwin
+        self.logger.info(f"AgentDoubleDQN создан")
 
     def select_action(self, state) -> int:  # for discrete action space
         states = torch.as_tensor((state,), dtype=torch.float32, device=self.device)
@@ -147,6 +210,7 @@ class AgentDDPG(AgentBase):
         self.if_use_cri_target = self.if_use_act_target = True
         self.Act = Actor
         self.Cri = Critic
+        self.logger.info(f"AgentDDPG создан: explore_noise={self.explore_noise}")
 
     def select_action(self, state) -> np.ndarray:
         states = torch.as_tensor((state,), dtype=torch.float32, device=self.device)
@@ -185,6 +249,7 @@ class AgentTD3(AgentDDPG):
         self.policy_noise = 0.2  # standard deviation of policy noise
         self.update_freq = 2  # delay update frequency
         self.Cri = CriticTwin
+        self.logger.info(f"AgentTD3 создан: policy_noise={self.policy_noise}, update_freq={self.update_freq}")
 
     def update_net(self, buffer, batch_size, repeat_times, soft_update_tau) -> tuple:
         buffer.update_now_len()
@@ -220,6 +285,7 @@ class AgentSAC(AgentBase):
         self.if_use_cri_target = True
         self.Act = ActorSAC
         self.Cri = CriticTwin
+        self.logger.info(f"AgentSAC создан")
 
     def select_action(self, state) -> np.ndarray:
         states = torch.as_tensor((state,), dtype=torch.float32, device=self.device)
@@ -262,6 +328,7 @@ class AgentPPO(AgentBase):
         self.lambda_entropy = 0.02  # could be 0.02
         self.Act = ActorPPO
         self.Cri = CriticAdv
+        self.logger.info(f"AgentPPO создан: ratio_clip={self.ratio_clip}, lambda_entropy={self.lambda_entropy}")
 
     def select_action(self, state):
         states = torch.as_tensor((state,), dtype=torch.float32, device=self.device)
@@ -343,6 +410,7 @@ class AgentDiscretePPO(AgentPPO):
     def __init__(self):
         super().__init__()
         self.Act = ActorDiscretePPO
+        self.logger.info(f"AgentDiscretePPO создан")
 
     def explore_env(self, env, target_step, reward_scale, gamma):
         trajectory_list = list()
@@ -368,6 +436,7 @@ class ReplayBuffer:
         self.if_on_policy = if_on_policy
         self.action_dim = 1 if if_discrete else action_dim
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.logger = logger.getChild("ReplayBuffer")
 
         if if_on_policy:
             other_dim = 1 + 1 + self.action_dim + action_dim
@@ -379,6 +448,9 @@ class ReplayBuffer:
             other_dim = 1 + 1 + self.action_dim
             self.buf_other = torch.empty((max_len, other_dim), dtype=torch.float32, device=self.device)
             self.buf_state = torch.empty((max_len, state_dim), dtype=torch.float32, device=self.device)
+
+        self.logger.info(f"ReplayBuffer инициализирован: max_len={max_len}, state_dim={state_dim}, "
+                         f"action_dim={action_dim}, if_discrete={if_discrete}, if_on_policy={if_on_policy}")
 
     def append_buffer(self, state, other):
         self.buf_state[self.next_idx] = state
