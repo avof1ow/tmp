@@ -6,7 +6,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Annotated, Any, Callable, Literal, get_args, get_origin, get_type_hints
-from functools import lru_cache  # Добавлен импорт
+from functools import lru_cache
 
 from griffe import Docstring, DocstringSectionKind
 from pydantic import BaseModel, Field, create_model
@@ -89,6 +89,18 @@ class FuncDocumentation:
 
 DocstringStyle = Literal["google", "numpy", "sphinx"]
 
+# Предкомпилированные регулярные выражения
+_SPHINX_PATTERNS = [re.compile(r"^:param\s", re.MULTILINE),
+                    re.compile(r"^:type\s", re.MULTILINE),
+                    re.compile(r"^:return:", re.MULTILINE),
+                    re.compile(r"^:rtype:", re.MULTILINE)]
+_NUMPY_PATTERNS = [re.compile(r"^Parameters\s*\n\s*-{3,}", re.MULTILINE),
+                   re.compile(r"^Returns\s*\n\s*-{3,}", re.MULTILINE),
+                   re.compile(r"^Yields\s*\n\s*-{3,}", re.MULTILINE)]
+_GOOGLE_PATTERNS = [re.compile(r"^(Args|Arguments):", re.MULTILINE),
+                    re.compile(r"^(Returns):", re.MULTILINE),
+                    re.compile(r"^(Raises):", re.MULTILINE)]
+
 
 # As of Feb 2025, the automatic style detection in griffe is an Insiders feature. This
 # code approximates it.
@@ -96,26 +108,19 @@ def _detect_docstring_style(doc: str) -> DocstringStyle:
     scores: dict[DocstringStyle, int] = {"sphinx": 0, "numpy": 0, "google": 0}
 
     # Sphinx style detection: look for :param, :type, :return:, and :rtype:
-    sphinx_patterns = [r"^:param\s", r"^:type\s", r"^:return:", r"^:rtype:"]
-    for pattern in sphinx_patterns:
-        if re.search(pattern, doc, re.MULTILINE):
+    for pattern in _SPHINX_PATTERNS:
+        if pattern.search(doc):
             scores["sphinx"] += 1
 
     # Numpy style detection: look for headers like 'Parameters', 'Returns', or 'Yields' followed by
     # a dashed underline
-    numpy_patterns = [
-        r"^Parameters\s*\n\s*-{3,}",
-        r"^Returns\s*\n\s*-{3,}",
-        r"^Yields\s*\n\s*-{3,}",
-    ]
-    for pattern in numpy_patterns:
-        if re.search(pattern, doc, re.MULTILINE):
+    for pattern in _NUMPY_PATTERNS:
+        if pattern.search(doc):
             scores["numpy"] += 1
 
     # Google style detection: look for section headers with a trailing colon
-    google_patterns = [r"^(Args|Arguments):", r"^(Returns):", r"^(Raises):"]
-    for pattern in google_patterns:
-        if re.search(pattern, doc, re.MULTILINE):
+    for pattern in _GOOGLE_PATTERNS:
+        if pattern.search(doc):
             scores["google"] += 1
 
     max_score = max(scores.values())
@@ -123,12 +128,10 @@ def _detect_docstring_style(doc: str) -> DocstringStyle:
         return "google"
 
     # Priority order: sphinx > numpy > google in case of tie
-    styles: list[DocstringStyle] = ["sphinx", "numpy", "google"]
-
-    for style in styles:
-        if scores[style] == max_score:
-            return style
-
+    if scores["sphinx"] == max_score:
+        return "sphinx"
+    if scores["numpy"] == max_score:
+        return "numpy"
     return "google"
 
 
@@ -157,6 +160,13 @@ def _cached_get_type_hints(func: Callable[..., Any]) -> dict[str, Any]:
     return get_type_hints(func, include_extras=True)
 
 
+@lru_cache(maxsize=128)
+def _cached_getdoc(func: Callable[..., Any]) -> str | None:
+    """Кэшированная версия inspect.getdoc."""
+    return inspect.getdoc(func)
+
+
+@lru_cache(maxsize=128)
 def generate_func_documentation(
     func: Callable[..., Any], style: DocstringStyle | None = None
 ) -> FuncDocumentation:
@@ -172,10 +182,9 @@ def generate_func_documentation(
         A FuncDocumentation object containing the function's name, description, and parameter
         descriptions.
     """
-    name = func.__name__
-    doc = inspect.getdoc(func)
+    doc = _cached_getdoc(func)
     if not doc:
-        return FuncDocumentation(name=name, description=None, param_descriptions=None)
+        return FuncDocumentation(name=func.__name__, description=None, param_descriptions=None)
 
     with _suppress_griffe_logging():
         docstring = Docstring(doc, lineno=1, parser=style or _detect_docstring_style(doc))
