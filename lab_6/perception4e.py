@@ -1,752 +1,467 @@
-"""
-Unit tests for perception4e.py
-"""
-import pytest
+"""Perception (Chapter 24)"""
+
+import cv2
+import keras
+import matplotlib.pyplot as plt
 import numpy as np
-import sys
-import os
-import warnings
-from unittest.mock import patch, MagicMock, call, mock_open, PropertyMock
-
-# Добавляем путь к исходному коду
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from perception4e import (
-    array_normalization,
-    gradient_edge_detector,
-    gaussian_derivative_edge_detector,
-    laplacian_edge_detector,
-    gen_gray_scale_picture,
-    sum_squared_difference,
-    probability_contour_detection,
-    gen_discs,
-    show_edges,
-    group_contour_detection,
-    image_to_graph,
-    generate_edge_weight,
-    Graph,
-    pool_rois,
-    pool_roi,
-    selective_search,
-    load_MINST,
-    simple_convnet,
-    train_model
-)
-
-
-# ============================================================================
-# ПАРАМЕТРИЗОВАННЫЕ ТЕСТЫ ДЛЯ ОСНОВНЫХ ФУНКЦИЙ
-# ============================================================================
-
-class TestArrayNormalizationParametrized:
-    """Параметризованные тесты для функции нормализации"""
-
-    @pytest.mark.parametrize("input_array,range_min,range_max,expected_min,expected_max", [
-        # Базовые случаи
-        ([1, 2, 3, 4, 5], 0, 1, 0, 1),
-        ([10, 20, 30], 0, 100, 0, 100),
-        ([-5, 0, 5], -1, 1, -1, 1),
-
-        # Отрицательные значения
-        ([-10, -5, 0, 5, 10], 0, 255, 0, 255),
-        ([100, 200, 300], -1, 1, -1, 1),
-
-        # Один элемент
-        ([42], 0, 100, 0, 100),
-        ([999], -10, 10, -10, 10),
-
-        # Все одинаковые
-        ([7, 7, 7, 7], 0, 1, 0, 1),
-    ])
-    def test_normalization_ranges(self, input_array, range_min, range_max, expected_min, expected_max):
-        """Тест что нормализация работает в заданных диапазонах"""
-        # Act
-        result = array_normalization(np.array(input_array), range_min, range_max)
-
-        # Assert
-        assert np.allclose(result.min(), expected_min, atol=1e-10)
-        assert np.allclose(result.max(), expected_max, atol=1e-10)
-
-    @pytest.mark.parametrize("input_data", [
-        # Разные типы входных данных
-        [1.0, 2.0, 3.0],           # List of floats
-        (1, 2, 3, 4),              # Tuple
-        np.array([1, 2, 3]),       # Numpy array
-        [[1, 2], [3, 4]],          # 2D list
-        np.array([[1, 2], [3, 4]]), # 2D array
-    ])
-    def test_normalization_input_types(self, input_data):
-        """Тест что функция работает с разными типами входных данных"""
-        # Act
-        result = array_normalization(input_data, 0, 1)
-
-        # Assert
-        assert isinstance(result, np.ndarray)
-        assert result.min() >= 0
-        assert result.max() <= 1
-
-
-class TestEdgeDetectorsParametrized:
-    """Параметризованные тесты для детекторов границ"""
-
-    @pytest.fixture
-    def edge_test_images(self):
-        """Фикстура с тестовыми изображениями для edge detection"""
-        images = {}
-
-        # Вертикальный край
-        vertical_edge = np.zeros((10, 10))
-        vertical_edge[:, 5:] = 255
-        images['vertical_edge'] = vertical_edge
-
-        # Горизонтальный край
-        horizontal_edge = np.zeros((10, 10))
-        horizontal_edge[5:, :] = 255
-        images['horizontal_edge'] = horizontal_edge
-
-        # Диагональный край
-        diagonal_edge = np.zeros((10, 10))
-        for i in range(10):
-            diagonal_edge[i, i:] = 255
-        images['diagonal_edge'] = diagonal_edge
-
-        # Шахматная доска
-        checkerboard = np.zeros((8, 8))
-        for i in range(8):
-            for j in range(8):
-                if (i + j) % 2 == 0:
-                    checkerboard[i, j] = 255
-        images['checkerboard'] = checkerboard
-
-        # Плавный градиент
-        gradient = np.zeros((10, 10))
-        for i in range(10):
-            gradient[i, :] = i * 25.5
-        images['gradient'] = gradient
-
-        return images
-
-    @pytest.mark.parametrize("detector_func", [
-        gradient_edge_detector,
-        gaussian_derivative_edge_detector,
-        laplacian_edge_detector,
-    ])
-    @pytest.mark.parametrize("image_type", [
-        'vertical_edge',
-        'horizontal_edge',
-        'diagonal_edge',
-        'checkerboard',
-        'gradient'
-    ])
-    def test_edge_detectors_on_various_images(self, edge_test_images, detector_func, image_type):
-        """Параметризованный тест всех детекторов на различных изображениях"""
-        # Skip certain combinations that might fail
-        if detector_func.__name__ == 'laplacian_edge_detector' and image_type == 'gradient':
-            pytest.skip("Laplacian may not work well on smooth gradients")
-
-        # Arrange
-        image = edge_test_images[image_type]
-
-        # Act
-        edges = detector_func(image)
-
-        # Assert
-        assert edges.shape == image.shape
-        assert edges.dtype in [np.float32, np.float64, np.float128]
-        assert edges.min() >= 0
-        assert edges.max() <= 255
-
-        # Проверяем что нет NaN или inf
-        assert not np.isnan(edges).any()
-        assert not np.isinf(edges).any()
-
-        # Для изображений с краями должны быть ненулевые значения
-        if 'edge' in image_type:
-            assert np.any(edges > 10)  # Эвристический порог
-
-    @pytest.mark.parametrize("image_size", [
-        (2, 2),    # Минимальный размер
-        (3, 3),    # Нечетный размер
-        (4, 4),    # Четный размер
-        (10, 10),  # Средний размер
-        (50, 50),  # Большой размер
-    ])
-    @pytest.mark.parametrize("detector_func", [
-        gradient_edge_detector,
-        gaussian_derivative_edge_detector,
-        laplacian_edge_detector,
-    ])
-    def test_edge_detectors_different_sizes(self, image_size, detector_func):
-        """Тест детекторов на изображениях разного размера"""
-        # Arrange
-        height, width = image_size
-        image = np.random.rand(height, width) * 255
-
-        # Act
-        edges = detector_func(image)
-
-        # Assert
-        assert edges.shape == (height, width)
-        assert edges.min() >= 0
-        assert edges.max() <= 255
-
-
-class TestSSDParametrized:
-    """Параметризованные тесты для суммы квадратов разностей"""
-
-    @pytest.mark.parametrize("image_size,shift,max_shift", [
-        ((10, 10), (0, 0), 5),
-        ((20, 20), (3, 2), 10),
-        ((30, 30), (-5, 3), 15),
-        ((15, 15), (7, -4), 10),
-        ((25, 25), (0, 0), 12),
-    ])
-    def test_ssd_known_shifts(self, image_size, shift, max_shift):
-        """Тест SSD с известными сдвигами на разных размерах"""
-        # Arrange
-        np.random.seed(42)
-        height, width = image_size
-        shift_x, shift_y = shift
-
-        # Создаем базовое изображение
-        base_image = np.random.rand(height, width) * 255
-
-        # Создаем сдвинутое изображение
-        shifted_image = np.roll(base_image, shift_x, axis=0)
-        shifted_image = np.roll(shifted_image, shift_y, axis=1)
-
-        # Обрезаем края для корректного сравнения
-        if abs(shift_x) > 0 or abs(shift_y) > 0:
-            # Для простоты тестируем только когда сдвиг в пределах max_shift
-            if abs(shift_x) <= max_shift and abs(shift_y) <= max_shift:
-                # Act
-                detected_shift, ssd = sum_squared_difference(base_image, shifted_image)
-
-                # Assert
-                # SSD должен быть очень маленьким
-                assert ssd < 1e-10
-                # Должен обнаружить правильный сдвиг
-                assert detected_shift == (shift_x, shift_y)
-
-    @pytest.mark.parametrize("noise_level", [0.0, 0.01, 0.05, 0.1, 0.2])
-    def test_ssd_noise_robustness(self, noise_level):
-        """Тест устойчивости SSD к шуму"""
-        # Arrange
-        np.random.seed(42)
-        base_image = np.random.rand(20, 20) * 255
-
-        # Добавляем шум
-        noise = np.random.normal(0, noise_level * 255, base_image.shape)
-        noisy_image = np.clip(base_image + noise, 0, 255)
-
-        # Act
-        shift, ssd = sum_squared_difference(base_image, noisy_image)
-
-        # Assert
-        # Должен обнаружить сдвиг (0, 0)
-        assert shift == (0, 0)
-        # SSD должен увеличиваться с увеличением шума
-        if noise_level > 0:
-            assert ssd > 0
-
-
-class TestROIPoolingParametrized:
-    """Параметризованные тесты для ROI pooling"""
-
-    @pytest.fixture
-    def feature_map_factory(self):
-        """Фабрика для создания карт признаков"""
-        def create_feature_map(height, width, channels):
-            """Создает карту признаков с предсказуемым паттерном"""
-            feature_map = np.zeros((height, width, channels))
-            for i in range(height):
-                for j in range(width):
-                    for k in range(channels):
-                        # Создаем паттерн который легко проверить
-                        feature_map[i, j, k] = (i * width + j) * (k + 1) / (height * width)
-            return feature_map
-        return create_feature_map
-
-    @pytest.mark.parametrize("feature_map_shape,roi,pool_size", [
-        # Маленькие карты
-        ((8, 8, 3), [0.0, 0.0, 1.0, 1.0], (2, 2)),
-        ((10, 10, 16), [0.2, 0.2, 0.8, 0.8], (3, 3)),
-
-        # Разные соотношения сторон
-        ((20, 10, 8), [0.0, 0.0, 1.0, 1.0], (4, 2)),
-        ((10, 20, 8), [0.0, 0.0, 1.0, 1.0], (2, 4)),
-
-        # Частичные ROI
-        ((16, 16, 32), [0.25, 0.25, 0.75, 0.75], (4, 4)),
-        ((32, 32, 64), [0.1, 0.1, 0.5, 0.5], (7, 7)),
-    ])
-    def test_pool_roi_parametric(self, feature_map_factory, feature_map_shape, roi, pool_size):
-        """Параметризованный тест ROI pooling"""
-        # Arrange
-        height, width, channels = feature_map_shape
-        feature_map = feature_map_factory(height, width, channels)
-        pooled_height, pooled_width = pool_size
-
-        # Act
-        pooled = pool_roi(feature_map, roi, pooled_height, pooled_width)
-
-        # Assert
-        assert pooled.shape == (pooled_height, pooled_width, channels)
-        assert not np.isnan(pooled).any()
-        assert not np.isinf(pooled).any()
-
-        # Проверяем что значения в разумных пределах
-        assert pooled.min() >= 0
-        assert pooled.max() <= 1.0
-
-    @pytest.mark.parametrize("num_rois", [1, 3, 5, 10, 20])
-    def test_pool_rois_multiple(self, feature_map_factory, num_rois):
-        """Тест pool_rois с разным количеством ROI"""
-        # Arrange
-        feature_map = feature_map_factory(20, 20, 64)
-
-        # Создаем ROI
-        np.random.seed(42)
-        rois = []
-        for _ in range(num_rois):
-            x_min = np.random.uniform(0, 0.7)
-            y_min = np.random.uniform(0, 0.7)
-            x_max = min(x_min + np.random.uniform(0.1, 0.3), 1.0)
-            y_max = min(y_min + np.random.uniform(0.1, 0.3), 1.0)
-            rois.append([x_min, y_min, x_max, y_max])
-
-        # Act
-        pooled_list = pool_rois(feature_map, rois, pooled_height=7, pooled_width=7)
-
-        # Assert
-        assert len(pooled_list) == num_rois
-        for pooled in pooled_list:
-            assert pooled.shape == (7, 7, 64)
-
-
-# ============================================================================
-# ТЕСТЫ С ИСПОЛЬЗОВАНИЕМ FIXTURES И MOCKS
-# ============================================================================
-
-class TestGraphAlgorithms:
-    """Тесты для графовых алгоритмов с использованием фикстур"""
-
-    @pytest.fixture
-    def simple_graph(self):
-        """Фикстура для простого графа 3x3"""
-        image = np.array([
-            [1, 2, 3],
-            [4, 5, 6],
-            [7, 8, 9]
-        ])
-        return Graph(image)
-
-    @pytest.fixture
-    def edge_case_graphs(self):
-        """Фикстура для граничных случаев графов"""
-        cases = {}
-
-        # Одно пиксель
-        cases['single_pixel'] = Graph(np.array([[42]]))
-
-        # Одна строка
-        cases['single_row'] = Graph(np.array([[1, 2, 3, 4, 5]]))
-
-        # Один столбец
-        cases['single_column'] = Graph(np.array([[1], [2], [3], [4], [5]]))
-
-        # Все одинаковые значения
-        cases['uniform'] = Graph(np.ones((3, 3)) * 100)
-
-        # Высокий контраст
-        high_contrast = np.zeros((4, 4))
-        high_contrast[:2, :] = 0
-        high_contrast[2:, :] = 255
-        cases['high_contrast'] = Graph(high_contrast)
-
-        return cases
-
-    def test_graph_initialization_fixture(self, simple_graph):
-        """Тест инициализации графа с использованием фикстуры"""
-        assert simple_graph.ROW == 9  # 3x3 = 9 вершин
-        assert simple_graph.COL == 2
-
-        # Проверяем flow для конкретного ребра
-        assert (0, 1) in simple_graph.flow[(0, 0)]
-        weight = simple_graph.flow[(0, 0)][(0, 1)]
-        expected = 255 - abs(1 - 2)  # 255 - 1 = 254
-        assert weight == expected
-
-    @pytest.mark.parametrize("graph_type", [
-        'single_pixel',
-        'single_row',
-        'single_column',
-        'uniform',
-        'high_contrast'
-    ])
-    def test_graph_edge_cases(self, edge_case_graphs, graph_type):
-        """Тест граничных случаев графов"""
-        graph = edge_case_graphs[graph_type]
-
-        # Проверяем что граф инициализирован
-        assert hasattr(graph, 'flow')
-        assert hasattr(graph, 'image')
-
-        # Проверяем BFS для некоторых пар вершин
-        if graph_type == 'single_pixel':
-            # Для одного пикселя BFS всегда возвращает False
+import scipy.signal
+from keras.datasets import mnist
+from keras.layers import Dense, Activation, Flatten, InputLayer, Conv2D, MaxPooling2D
+from keras.models import Sequential
+
+from utils4e import gaussian_kernel_2D
+
+
+# ____________________________________________________
+# 24.3 Early Image Processing Operators
+# 24.3.1 Edge Detection
+
+
+def array_normalization(array, range_min, range_max):
+    """Normalize an array in the range of (range_min, range_max)"""
+    if not isinstance(array, np.ndarray):
+        array = np.asarray(array)
+    array = array - np.min(array)
+    array = array * (range_max - range_min) / np.max(array) + range_min
+    return array
+
+
+def gradient_edge_detector(image):
+    """
+    Image edge detection by calculating gradients in the image
+    :param image: numpy ndarray or an iterable object
+    :return: numpy ndarray, representing a gray scale image
+    """
+    if not isinstance(image, np.ndarray):
+        image = np.asarray(image)
+    # gradient filters of x and y direction edges
+    x_filter, y_filter = np.array([[1, -1]]), np.array([[1], [-1]])
+    # convolution between filter and image to get edges
+    y_edges = scipy.signal.convolve2d(image, x_filter, 'same')
+    x_edges = scipy.signal.convolve2d(image, y_filter, 'same')
+    edges = array_normalization(x_edges + y_edges, 0, 255)
+    return edges
+
+
+def gaussian_derivative_edge_detector(image):
+    """Image edge detector using derivative of gaussian kernels"""
+    if not isinstance(image, np.ndarray):
+        image = np.asarray(image)
+    gaussian_filter = gaussian_kernel_2D()
+    # init derivative of gaussian filters
+    x_filter = scipy.signal.convolve2d(gaussian_filter, np.asarray([[1, -1]]), 'same')
+    y_filter = scipy.signal.convolve2d(gaussian_filter, np.asarray([[1], [-1]]), 'same')
+    # extract edges using convolution
+    y_edges = scipy.signal.convolve2d(image, x_filter, 'same')
+    x_edges = scipy.signal.convolve2d(image, y_filter, 'same')
+    edges = array_normalization(x_edges + y_edges, 0, 255)
+    return edges
+
+
+def laplacian_edge_detector(image):
+    """Extract image edge with laplacian filter"""
+    if not isinstance(image, np.ndarray):
+        image = np.asarray(image)
+    # init laplacian filter
+    laplacian_kernel = np.asarray([[0, -1, 0], [-1, 4, -1], [0, -1, 0]])
+    # extract edges with convolution
+    edges = scipy.signal.convolve2d(image, laplacian_kernel, 'same')
+    edges = array_normalization(edges, 0, 255)
+    return edges
+
+
+def show_edges(edges):
+    """ helper function to show edges picture"""
+    plt.imshow(edges, cmap='gray', vmin=0, vmax=255)
+    plt.axis('off')
+    plt.show()
+
+
+# __________________________________________________
+# 24.3.3 Optical flow
+
+
+def sum_squared_difference(pic1, pic2):
+    """SSD of two frames"""
+    pic1 = np.asarray(pic1)
+    pic2 = np.asarray(pic2)
+    assert pic1.shape == pic2.shape
+    min_ssd = np.inf
+    min_dxy = (np.inf, np.inf)
+
+    # consider picture shift from -30 to 30
+    for Dx in range(-30, 31):
+        for Dy in range(-30, 31):
+            # shift the image
+            shifted_pic = np.roll(pic2, Dx, axis=0)
+            shifted_pic = np.roll(shifted_pic, Dy, axis=1)
+            # calculate the difference
+            diff = np.sum((pic1 - shifted_pic) ** 2)
+            if diff < min_ssd:
+                min_dxy = (Dx, Dy)
+                min_ssd = diff
+    return min_dxy, min_ssd
+
+
+# ____________________________________________________
+# segmentation
+
+def gen_gray_scale_picture(size, level=3):
+    """
+    Generate a picture with different gray scale levels
+    :param size: size of generated picture
+    :param level: the number of level of gray scales in the picture,
+                  range (0, 255) are equally divided by number of levels
+    :return image in numpy ndarray type
+    """
+    assert level > 0
+    # init an empty image
+    image = np.zeros((size, size))
+    if level == 1:
+        return image
+    # draw a square on the left upper corner of the image
+    for x in range(size):
+        for y in range(size):
+            image[x, y] += (250 // (level - 1)) * (max(x, y) * level // size)
+    return image
+
+
+gray_scale_image = gen_gray_scale_picture(3)
+
+
+def probability_contour_detection(image, discs, threshold=0):
+    """
+    Detect edges/contours by applying a set of discs to an image
+    :param image: an image in type of numpy ndarray
+    :param discs: a set of discs/filters to apply to pixels of image
+    :param threshold: threshold to tell whether the pixel at (x, y) is on an edge
+    :return image showing edges in numpy ndarray type
+    """
+    # init an empty output image
+    res = np.zeros(image.shape)
+    step = discs[0].shape[0]
+    for x_i in range(0, image.shape[0] - step + 1, 1):
+        for y_i in range(0, image.shape[1] - step + 1, 1):
+            diff = []
+            # apply each pair of discs and calculate the difference
+            for d in range(0, len(discs), 2):
+                disc1, disc2 = discs[d], discs[d + 1]
+                # crop the region of interest
+                region = image[x_i: x_i + step, y_i: y_i + step]
+                diff.append(np.sum(np.multiply(region, disc1)) - np.sum(np.multiply(region, disc2)))
+            if max(diff) > threshold:
+                # change color of the center of region
+                res[x_i + step // 2, y_i + step // 2] = 255
+    return res
+
+
+def group_contour_detection(image, cluster_num=2):
+    """
+    Detecting contours in an image with k-means clustering
+    :param image: an image in numpy ndarray type
+    :param cluster_num: number of clusters in k-means
+    """
+    img = image
+    Z = np.float32(img)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+    K = cluster_num
+    # use kmeans in opencv-python
+    ret, label, center = cv2.kmeans(Z, K, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+    center = np.uint8(center)
+    res = center[label.flatten()]
+    res2 = res.reshape(img.shape)
+    # show the image
+    # cv2.imshow('res2', res2)
+    # cv2.waitKey(0)
+    # cv2.destroyAllWindows()
+    return res2
+
+
+def image_to_graph(image):
+    """
+    Convert an image to an graph in adjacent matrix form
+    """
+    graph_dict = {}
+    for x in range(image.shape[0]):
+        for y in range(image.shape[1]):
+            graph_dict[(x, y)] = [(x + 1, y) if x + 1 < image.shape[0] else None,
+                                  (x, y + 1) if y + 1 < image.shape[1] else None]
+    return graph_dict
+
+
+def generate_edge_weight(image, v1, v2):
+    """
+    Find edge weight between two vertices in an image
+    :param image: image in numpy ndarray type
+    :param v1, v2: verticles in the image in form of (x index, y index)
+    """
+    diff = abs(image[v1[0], v1[1]] - image[v2[0], v2[1]])
+    return 255 - diff
+
+
+class Graph:
+    """Graph in adjacent matrix to represent an image"""
+
+    def __init__(self, image):
+        """image: ndarray"""
+        self.graph = image_to_graph(image)
+        # number of columns and rows
+        self.ROW = len(self.graph)
+        self.COL = 2
+        self.image = image
+        # dictionary to save the maximum flow of each edge
+        self.flow = {}
+        # initialize the flow
+        for s in self.graph:
+            self.flow[s] = {}
+            for t in self.graph[s]:
+                if t:
+                    self.flow[s][t] = generate_edge_weight(image, s, t)
+
+    def bfs(self, s, t, parent):
+        """Breadth first search to tell whether there is an edge between source and sink
+        parent: a list to save the path between s and t"""
+        # queue to save the current searching frontier
+        queue = [s]
+        visited = []
+
+        while queue:
+            u = queue.pop(0)
+            for node in self.graph[u]:
+                # only select edge with positive flow
+                if node not in visited and node and self.flow[u][node] > 0:
+                    queue.append(node)
+                    visited.append(node)
+                    parent.append((u, node))
+        return True if t in visited else False
+
+    def min_cut(self, source, sink):
+        """Find the minimum cut of the graph between source and sink"""
+        parent = []
+        max_flow = 0
+
+        while self.bfs(source, sink, parent):
+            path_flow = np.inf
+            # find the minimum flow of s-t path
+            for s, t in parent:
+                path_flow = min(path_flow, self.flow[s][t])
+
+            max_flow += path_flow
+
+            # update all edges between source and sink
+            for s in self.flow:
+                for t in self.flow[s]:
+                    if t[0] <= sink[0] and t[1] <= sink[1]:
+                        self.flow[s][t] -= path_flow
             parent = []
-            result = graph.bfs((0, 0), (0, 0), parent)
-            # Нет ребер, поэтому путь не найден
-            assert result is False
-        elif graph_type == 'high_contrast':
-            # Для высококонтрастного изображения проверяем веса
-            # Ребро между разными регионами должно иметь маленький вес
-            weight = graph.flow[(1, 0)][(2, 0)]
-            # Между 0 и 255 разница большая, вес маленький
-            assert weight == 0
-
-    def test_min_cut_simulation(self, simple_graph):
-        """Тест минимального разреза с моком BFS"""
-        with patch.object(simple_graph, 'bfs') as mock_bfs:
-            # Настраиваем mock чтобы он вернул True затем False
-            mock_bfs.side_effect = [True, False]
-
-            # Act
-            result = simple_graph.min_cut((0, 0), (2, 2))
-
-            # Assert
-            # BFS должен быть вызван 2 раза
-            assert mock_bfs.call_count == 2
-            # Проверяем аргументы первого вызова
-            first_call = mock_bfs.call_args_list[0]
-            assert first_call[0][0] == (0, 0)  # source
-            assert first_call[0][1] == (2, 2)  # sink
-            assert isinstance(first_call[0][2], list)  # parent list
-
-
-# ============================================================================
-# ИНТЕГРАЦИОННЫЕ ТЕСТЫ
-# ============================================================================
-
-class TestIntegrationScenarios:
-    """Интеграционные тестовые сценарии"""
-
-    @pytest.fixture
-    def image_processing_pipeline(self):
-        """Фикстура для пайплайна обработки изображений"""
-        class Pipeline:
-            def __init__(self):
-                self.results = {}
-
-            def run(self, image):
-                """Запускает полный пайплайн обработки"""
-                # 1. Обнаружение границ
-                self.results['gradient_edges'] = gradient_edge_detector(image)
-                self.results['gaussian_edges'] = gaussian_derivative_edge_detector(image)
-
-                # 2. Генерация дисков для контурного анализа
-                discs = gen_discs(3, 2)
-
-                # 3. Обнаружение контуров
-                self.results['contours'] = probability_contour_detection(
-                    image, discs[0], threshold=50
-                )
-
-                # 4. Конвертация в граф
-                graph = Graph(image)
-                self.results['graph'] = graph
-
-                return self.results
-
-        return Pipeline()
-
-    def test_full_image_processing_pipeline(self, image_processing_pipeline):
-        """Тест полного пайплайна обработки изображений"""
-        # Arrange
-        image = np.random.rand(20, 20) * 255
-
-        # Act
-        results = image_processing_pipeline.run(image)
-
-        # Assert
-        # Проверяем что все этапы выполнены
-        assert 'gradient_edges' in results
-        assert 'gaussian_edges' in results
-        assert 'contours' in results
-        assert 'graph' in results
-
-        # Проверяем размеры
-        assert results['gradient_edges'].shape == image.shape
-        assert results['gaussian_edges'].shape == image.shape
-        assert results['contours'].shape == image.shape
-
-        # Проверяем граф
-        graph = results['graph']
-        assert isinstance(graph, Graph)
-        assert graph.ROW == 400  # 20x20 = 400 вершин
-
-    @patch('perception4e.load_MINST')
-    @patch('keras.models.Sequential')
-    def test_training_evaluation_pipeline(self, mock_sequential, mock_load_minst):
-        """Тест пайплайна обучения и оценки"""
-        # Arrange
-        # Мокаем модель
-        mock_model = MagicMock()
-        mock_sequential.return_value = mock_model
-
-        # Мокаем данные
-        train_data = (
-            np.random.rand(500, 1, 28, 28).astype(np.float32),
-            np.eye(10)[np.random.randint(0, 10, 500)]
-        )
-        val_data = (
-            np.random.rand(100, 1, 28, 28).astype(np.float32),
-            np.eye(10)[np.random.randint(0, 10, 100)]
-        )
-        test_data = (
-            np.random.rand(200, 1, 28, 28).astype(np.float32),
-            np.eye(10)[np.random.randint(0, 10, 200)]
-        )
-
-        mock_load_minst.return_value = (train_data, val_data, test_data)
-
-        # Настраиваем модель
-        mock_history = MagicMock()
-        mock_model.fit.return_value = mock_history
-
-        # Симулируем улучшение точности
-        accuracy_values = [0.6, 0.7, 0.8, 0.85, 0.88]
-        mock_model.evaluate.return_value = [0.3, accuracy_values[-1]]  # [loss, accuracy]
-
-        # Act
-        trained_model = train_model(mock_model)
-
-        # Assert
-        # Проверяем что пайплайн выполнен полностью
-        mock_load_minst.assert_called_once()
-        mock_model.fit.assert_called_once()
-        mock_model.evaluate.assert_called_once()
-
-        # Проверяем что модель возвращена
-        assert trained_model == mock_model
-
-
-# ============================================================================
-# ТЕСТЫ ОБРАБОТКИ ОШИБОК
-# ============================================================================
-
-class TestErrorHandling:
-    """Тесты обработки ошибок и исключительных ситуаций"""
-
-    @pytest.mark.parametrize("invalid_input,expected_error", [
-        # Неверные типы данных
-        ("not an array", (AttributeError, TypeError)),
-        (None, (AttributeError, TypeError)),
-        (123, (AttributeError, TypeError)),
-
-        # Пустые массивы
-        (np.array([]), (ValueError, IndexError)),
-        (np.array([[]]), (ValueError, IndexError)),
-    ])
-    def test_edge_detector_invalid_input(self, invalid_input, expected_error):
-        """Тест обработки некорректного ввода в детекторах границ"""
-        # Проверяем все детекторы
-        detectors = [
-            gradient_edge_detector,
-            gaussian_derivative_edge_detector,
-            laplacian_edge_detector,
-        ]
-
-        for detector in detectors:
-            with pytest.raises(expected_error):
-                detector(invalid_input)
-
-    def test_pool_roi_invalid_roi_values(self):
-        """Тест обработки некорректных значений ROI"""
-        feature_map = np.random.rand(10, 10, 3)
-
-        invalid_rois = [
-            [1.5, 0.0, 0.5, 0.5],  # x_min > 1.0
-            [0.0, 1.5, 0.5, 0.5],  # y_min > 1.0
-            [0.6, 0.0, 0.4, 0.5],  # x_min > x_max
-            [0.0, 0.6, 0.5, 0.4],  # y_min > y_max
-            [-0.1, 0.0, 0.5, 0.5], # x_min < 0
-            [0.0, -0.1, 0.5, 0.5], # y_min < 0
-        ]
-
-        for roi in invalid_rois:
-            try:
-                result = pool_roi(feature_map, roi, 2, 2)
-                # Если не вызвало исключение, проверяем результат
-                assert not np.isnan(result).any()
-            except (ValueError, IndexError) as e:
-                # Ожидаемое поведение
-                assert "index" in str(e).lower() or "bound" in str(e).lower()
-
-    def test_warning_handling(self):
-        """Тест что функции не вызывают warnings в нормальных условиях"""
-        # Создаем тестовое изображение
-        image = np.random.rand(10, 10) * 255
-
-        # Отключаем warnings для теста
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")  # Превращаем warnings в ошибки
-
-            # Должны выполняться без warnings
-            result1 = gradient_edge_detector(image)
-            result2 = array_normalization(image, 0, 255)
-
-            # Проверяем результаты
-            assert not np.isnan(result1).any()
-            assert not np.isnan(result2).any()
-
-
-# ============================================================================
-# ТЕСТЫ ПРОИЗВОДИТЕЛЬНОСТИ
-# ============================================================================
-
-@pytest.mark.performance
-class TestPerformance:
-    """Тесты производительности (помечены для отдельного запуска)"""
-
-    @pytest.mark.parametrize("size", [10, 20, 50, 100])
-    def test_edge_detector_performance(self, size, benchmark):
-        """Бенчмарк детекторов границ"""
-        # Arrange
-        image = np.random.rand(size, size) * 255
-
-        # Act & Assert через benchmark
-        result = benchmark(gradient_edge_detector, image)
-
-        # Дополнительные проверки
-        assert result.shape == (size, size)
-
-    @pytest.mark.parametrize("num_rois", [1, 10, 50, 100])
-    def test_roi_pooling_performance(self, num_rois, benchmark):
-        """Бенчмарк ROI pooling"""
-        # Arrange
-        feature_map = np.random.rand(100, 100, 256)
-
-        # Создаем ROI
-        rois = []
-        for i in range(num_rois):
-            x = i * 0.01
-            y = i * 0.01
-            rois.append([x, y, min(x + 0.1, 1.0), min(y + 0.1, 1.0)])
-
-        # Act & Assert
-        result = benchmark(pool_rois, feature_map, rois, 7, 7)
-
-        assert len(result) == num_rois
-
-
-# ============================================================================
-# ДОПОЛНИТЕЛЬНЫЕ ТЕСТЫ ДЛЯ ПОЛНОГО ПОКРЫТИЯ
-# ============================================================================
-
-class TestMiscFunctions:
-    """Тесты для остальных функций"""
-
-    def test_gen_discs_different_scales(self):
-        """Тест генерации дисков разных масштабов"""
-        # Act
-        discs = gen_discs(init_scale=3, scales=3)
-
-        # Assert
-        assert len(discs) == 3
-        # Каждый масштаб должен иметь диски разного размера
-        assert discs[0][0].shape == (3, 3)
-        assert discs[1][0].shape == (6, 6)  # 3 * 2
-        assert discs[2][0].shape == (9, 9)  # 3 * 3
-
-    @patch('cv2.imshow')
-    @patch('cv2.waitKey')
-    @patch('cv2.destroyAllWindows')
-    def test_group_contour_detection_no_display(self, mock_destroy, mock_waitkey, mock_imshow):
-        """Тест что group_contour_detection не показывает окна"""
-        # Arrange
-        image = np.random.rand(10, 10) * 255
-
-        with patch('cv2.kmeans') as mock_kmeans:
-            mock_kmeans.return_value = (
-                True,
-                np.array([0, 1] * 50).reshape(10, 10),
-                np.array([[100], [200]])
-            )
-
-            # Act
-            result = group_contour_detection(image, cluster_num=2)
-
-            # Assert
-            # Функция не должна вызывать imshow/waitKey
-            mock_imshow.assert_not_called()
-            mock_waitkey.assert_not_called()
-            mock_destroy.assert_not_called()
-
-            # Но должна вернуть результат
-            assert result.shape == image.shape
-
-    def test_image_to_graph_complete_coverage(self):
-        """Тест полного покрытия image_to_graph"""
-        # Arrange
-        image = np.array([[1, 2, 3], [4, 5, 6]])
-
-        # Act
-        graph = image_to_graph(image)
-
-        # Assert
-        # Проверяем все вершины
-        for i in range(2):
-            for j in range(3):
-                assert (i, j) in graph
-
-        # Проверяем связи для центральной точки
-        connections = graph[(1, 1)]
-        assert (2, 1) not in connections  # Выход за границы по x
-        assert (1, 2) in connections or connections[1] == (1, 2)  # Справа
-
-
-# ============================================================================
-# ГЛАВНЫЙ БЛОК ДЛЯ ЗАПУСКА ТЕСТОВ
-# ============================================================================
-
-if __name__ == "__main__":
-    # Опции для запуска тестов
-    import argparse
-
-    parser = argparse.ArgumentParser(description='Run perception4e tests')
-    parser.add_argument('--fast', action='store_true', help='Run only fast tests')
-    parser.add_argument('--performance', action='store_true', help='Run performance tests')
-    parser.add_argument('--coverage', action='store_true', help='Generate coverage report')
-
-    args = parser.parse_args()
-
-    # Собираем аргументы для pytest
-    pytest_args = [
-        __file__,
-        "-v",
-        "--tb=short",
-    ]
-
-    if args.fast:
-        pytest_args.extend(["-k", "not performance"])
-    elif args.performance:
-        pytest_args.extend(["-k", "performance", "--durations=10"])
-
-    if args.coverage:
-        pytest_args.extend([
-            "--cov=perception4e",
-            "--cov-report=term",
-            "--cov-report=html:coverage_html"
-        ])
-
-    # Запускаем тесты
-    exit_code = pytest.main(pytest_args)
-
-    # Выводим краткую статистику
-    print("\n" + "="*60)
-    print("Тестирование завершено!")
-    print("="*60)
-
-    sys.exit(exit_code)
+        res = []
+        for i in self.flow:
+            for j in self.flow[i]:
+                if self.flow[i][j] == 0 and generate_edge_weight(self.image, i, j) > 0:
+                    res.append((i, j))
+        return res
+
+
+def gen_discs(init_scale, scales=1):
+    """
+    Generate a collection of disc pairs by splitting an round discs with different angles
+    :param init_scale: the initial size of each half discs
+    :param scales: scale number of each type of half discs, the scale size will be doubled each time
+    :return: the collection of generated discs: [discs of scale1, discs of scale2...]
+    """
+    discs = []
+    for m in range(scales):
+        scale = init_scale * (m + 1)
+        disc = []
+        # make the full empty dist
+        white = np.zeros((scale, scale))
+        center = (scale - 1) / 2
+        for i in range(scale):
+            for j in range(scale):
+                if (i - center) ** 2 + (j - center) ** 2 <= (center ** 2):
+                    white[i, j] = 255
+        # generate lower half and upper half
+        lower_half = np.copy(white)
+        lower_half[:(scale - 1) // 2, :] = 0
+        upper_half = lower_half[::-1, ::-1]
+        # generate left half and right half
+        disc += [lower_half, upper_half, np.transpose(lower_half), np.transpose(upper_half)]
+        # generate upper-left, lower-right, upper-right, lower-left half discs
+        disc += [np.tril(white, 0), np.triu(white, 0), np.flip(np.tril(white, 0), axis=0),
+                 np.flip(np.triu(white, 0), axis=0)]
+        discs.append(disc)
+    return discs
+
+
+# __________________________________________________
+# 24.4 Classifying Images
+
+
+def load_MINST(train_size, val_size, test_size):
+    """Load MINST dataset from keras"""
+    (x_train, y_train), (x_test, y_test) = mnist.load_data()
+    total_size = len(x_train)
+    if train_size + val_size > total_size:
+        train_size = total_size - val_size
+    x_train = x_train.reshape(x_train.shape[0], 1, 28, 28)
+    x_test = x_test.reshape(x_test.shape[0], 1, 28, 28)
+    x_train = x_train.astype('float32')
+    x_train /= 255
+    test_x = x_test.astype('float32')
+    test_x /= 255
+    y_train = keras.utils.to_categorical(y_train, 10)
+    y_test = keras.utils.to_categorical(y_test, 10)
+    return ((x_train[:train_size], y_train[:train_size]),
+            (x_train[train_size:train_size + val_size], y_train[train_size:train_size + val_size]),
+            (x_test[:test_size], y_test[:test_size]))
+
+
+def simple_convnet(size=3, num_classes=10):
+    """
+    Simple convolutional network for digit recognition
+    :param size: number of convolution layers
+    :param num_classes: number of output classes
+    :return a convolution network in keras model type
+    """
+    model = Sequential()
+    # add input layer for images of size (28, 28)
+    model.add(InputLayer(input_shape=(1, 28, 28)))
+    # add convolution layers and max pooling layers
+    for _ in range(size):
+        model.add(Conv2D(32, (2, 2), padding='same', kernel_initializer='random_uniform'))
+        model.add(MaxPooling2D(padding='same'))
+
+    # add flatten layer and output layers
+    model.add(Flatten())
+    model.add(Dense(num_classes))
+    model.add(Activation('softmax'))
+
+    # compile model
+    model.compile(loss='categorical_crossentropy',
+                  metrics=['accuracy'])
+    print(model.summary())
+    return model
+
+
+def train_model(model):
+    """Train the simple convolution network"""
+    # load dataset
+    (train_x, train_y), (val_x, val_y), (test_x, test_y) = load_MINST(1000, 100, 100)
+    model.fit(train_x, train_y, validation_data=(val_x, val_y), epochs=5, verbose=2, batch_size=32)
+    scores = model.evaluate(test_x, test_y, verbose=1)
+    print(scores)
+    return model
+
+
+# _____________________________________________________
+# 24.5 DETECTING OBJECTS
+
+
+def selective_search(image):
+    """
+    Selective search for object detection
+    :param image: str, the path of image or image in ndarray type with 3 channels
+    :return list of bounding boxes, each element is in form of [x_min, y_min, x_max, y_max]
+    """
+    if not image:
+        im = cv2.imread("./images/stapler1-test.png")
+    elif isinstance(image, str):
+        im = cv2.imread(image)
+    else:
+        im = np.stack(image * 3, axis=-1)
+
+    # use opencv python to extract bounding box with selective search
+    ss = cv2.ximgproc.segmentation.createSelectiveSearchSegmentation()
+    ss.setBaseImage(im)
+    ss.switchToSelectiveSearchQuality()
+    rects = ss.process()
+
+    # show bounding boxes with the input image
+    image_out = im.copy()
+    for rect in rects[:100]:
+        print(rect)
+        x, y, w, h = rect
+        cv2.rectangle(image_out, (x, y), (x + w, y + h), (0, 255, 0), 1, cv2.LINE_AA)
+    cv2.imshow("Output", image_out)
+    cv2.waitKey(0)
+    return rects
+
+
+# faster RCNN
+def pool_rois(feature_map, rois, pooled_height, pooled_width):
+    """
+    Applies ROI pooling for a single image and various ROIs
+    :param feature_map: ndarray, in shape of (width, height, channel)
+    :param rois: list of roi
+    :param pooled_height: height of pooled area
+    :param pooled_width: width of pooled area
+    :return list of pooled features
+    """
+
+    def curried_pool_roi(roi):
+        return pool_roi(feature_map, roi, pooled_height, pooled_width)
+
+    pooled_areas = list(map(curried_pool_roi, rois))
+    return pooled_areas
+
+
+def pool_roi(feature_map, roi, pooled_height, pooled_width):
+    """
+    Applies a single ROI pooling to a single image
+    :param feature_map: ndarray, in shape of (width, height, channel)
+    :param roi: region of interest, in form of [x_min_ratio, y_min_ratio, x_max_ratio, y_max_ratio]
+    :return feature of pooling output, in shape of (pooled_width, pooled_height)
+    """
+
+    # Compute the region of interest
+    feature_map_height = int(feature_map.shape[0])
+    feature_map_width = int(feature_map.shape[1])
+
+    h_start = int(feature_map_height * roi[0])
+    w_start = int(feature_map_width * roi[1])
+    h_end = int(feature_map_height * roi[2])
+    w_end = int(feature_map_width * roi[3])
+
+    region = feature_map[h_start:h_end, w_start:w_end, :]
+
+    # Divide the region into non overlapping areas
+    region_height = h_end - h_start
+    region_width = w_end - w_start
+    h_step = region_height // pooled_height
+    w_step = region_width // pooled_width
+
+    areas = [[(
+        i * h_step,
+        j * w_step,
+        (i + 1) * h_step if i + 1 < pooled_height else region_height,
+        (j + 1) * w_step if j + 1 < pooled_width else region_width)
+        for j in range(pooled_width)]
+        for i in range(pooled_height)]
+
+    # take the maximum of each area and stack the result
+    def pool_area(x):
+        return np.max(region[x[0]:x[2], x[1]:x[3], :])
+
+    pooled_features = np.stack([[pool_area(x) for x in row] for row in areas])
+    return pooled_features
+
+# faster rcnn demo can be installed and shown in jupyter notebook
+# def faster_rcnn_demo(directory):
+#     """
+#     show the demo of rcnn, the model is from
+#     @inproceedings{renNIPS15fasterrcnn,
+#     Author = {Shaoqing Ren and Kaiming He and Ross Girshick and Jian Sun},
+#     Title = {Faster {R-CNN}: Towards Real-Time Object Detection
+#              with Region Proposal Networks},
+#     Booktitle = {Advances in Neural Information Processing Systems ({NIPS})},
+#     Year = {2015}}
+#     :param directory: the directory where the faster rcnn model is installed
+#     """
+# os.chdir(directory + '/lib')
+# # make file
+# os.system("make clean")
+# os.system("make")
+# # run demo
+# os.chdir(directory)
+# os.system("./tools/demo.py")
+# return 0
