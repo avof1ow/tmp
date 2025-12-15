@@ -1,10 +1,15 @@
 [tool.pytest.ini_options]
-testpaths = ["."]
-python_files = ["test_*.py"]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v"
+addopts = "-v --tb=short"
 filterwarnings = [
     "ignore::DeprecationWarning",
-    "ignore::UserWarning"
+    "ignore::UserWarning",
+    "ignore::ImportWarning"
 ]
+
+[project]
+name = "lab6-perception-tests"
+version = "1.0.0"

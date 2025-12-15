@@ -1,5 +1,39 @@
 """Perception (Chapter 24)"""
 
+import numpy as np
+
+# Попробуем импортировать зависимости, но продолжим если их нет
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+    print("Warning: cv2 not available")
+
+try:
+    import keras
+    KERAS_AVAILABLE = True
+except ImportError:
+    KERAS_AVAILABLE = False
+    print("Warning: keras not available")
+
+try:
+    import scipy.signal
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    print("Warning: scipy.signal not available")
+
+try:
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    print("Warning: matplotlib not available")
+
+
+"""Perception (Chapter 24)"""
+
 import cv2
 import keras
 import matplotlib.pyplot as plt
@@ -20,10 +54,23 @@ from utils4e import gaussian_kernel_2D
 def array_normalization(array, range_min, range_max):
     """Normalize an array in the range of (range_min, range_max)"""
     if not isinstance(array, np.ndarray):
-        array = np.asarray(array)
-    array = array - np.min(array)
-    array = array * (range_max - range_min) / np.max(array) + range_min
-    return array
+        array = np.asarray(array, dtype=np.float64)
+
+    array_min = np.min(array)
+    array_max = np.max(array)
+
+    # Обработка случая, когда все значения одинаковы
+    if array_max == array_min:
+        # Если все значения одинаковы, возвращаем массив из range_min
+        return np.full_like(array, range_min, dtype=np.float64)
+
+    # Нормализация с небольшой защитой
+    epsilon = 1e-10  # Маленькое значение для избежания численных проблем
+    array_normalized = array - array_min
+    array_normalized = array_normalized * (range_max - range_min) / (array_max - array_min + epsilon)
+    array_normalized = array_normalized + range_min
+
+    return array_normalized
 
 
 def gradient_edge_detector(image):
