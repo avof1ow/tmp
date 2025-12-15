@@ -168,7 +168,7 @@ def _cached_getdoc(func: Callable[..., Any]) -> str | None:
 
 @lru_cache(maxsize=128)
 def generate_func_documentation(
-    func: Callable[..., Any], style: DocstringStyle | None = None
+        func: Callable[..., Any], style: DocstringStyle | None = None
 ) -> FuncDocumentation:
     """
     Extracts metadata from a function docstring, in preparation for sending it to an LLM as a tool.
@@ -233,13 +233,17 @@ def _extract_description_from_metadata(metadata: tuple[Any, ...]) -> str | None:
     return None
 
 
+# Кэш для созданных моделей Pydantic
+_MODEL_CACHE: dict[str, type[BaseModel]] = {}
+
+
 def function_schema(
-    func: Callable[..., Any],
-    docstring_style: DocstringStyle | None = None,
-    name_override: str | None = None,
-    description_override: str | None = None,
-    use_docstring_info: bool = True,
-    strict_json_schema: bool = True,
+        func: Callable[..., Any],
+        docstring_style: DocstringStyle | None = None,
+        name_override: str | None = None,
+        description_override: str | None = None,
+        use_docstring_info: bool = True,
+        strict_json_schema: bool = True,
 ) -> FuncSchema:
     """
     Given a Python function, extracts a `FuncSchema` from it, capturing the name, description,
@@ -326,84 +330,91 @@ def function_schema(
                 )
         filtered_params.append((name, param))
 
-    # We will collect field definitions for create_model as a dict:
-    #   field_name -> (type_annotation, default_value_or_Field(...))
-    fields: dict[str, Any] = {}
+    # Проверяем, есть ли уже модель в кэше
+    cache_key = f"{func_name}_{strict_json_schema}_{use_docstring_info}_{docstring_style}"
 
-    for name, param in filtered_params:
-        ann = type_hints.get(name, param.annotation)
-        default = param.default
+    if cache_key in _MODEL_CACHE:
+        dynamic_model = _MODEL_CACHE[cache_key]
+    else:
+        # We will collect field definitions for create_model as a dict:
+        #   field_name -> (type_annotation, default_value_or_Field(...))
+        fields: dict[str, Any] = {}
 
-        # If there's no type hint, assume `Any`
-        if ann == inspect._empty:
-            ann = Any
+        for name, param in filtered_params:
+            ann = type_hints.get(name, param.annotation)
+            default = param.default
 
-        # If a docstring param description exists, use it
-        field_description = param_descs.get(name, None)
+            # If there's no type hint, assume `Any`
+            if ann == inspect._empty:
+                ann = Any
 
-        # Handle different parameter kinds
-        if param.kind == param.VAR_POSITIONAL:
-            # e.g. *args: extend positional args
-            if get_origin(ann) is tuple:
-                # e.g. def foo(*args: tuple[int, ...]) -> treat as List[int]
-                args_of_tuple = get_args(ann)
-                if len(args_of_tuple) == 2 and args_of_tuple[1] is Ellipsis:
-                    ann = list[args_of_tuple[0]]  # type: ignore
+            # If a docstring param description exists, use it
+            field_description = param_descs.get(name, None)
+
+            # Handle different parameter kinds
+            if param.kind == param.VAR_POSITIONAL:
+                # e.g. *args: extend positional args
+                if get_origin(ann) is tuple:
+                    # e.g. def foo(*args: tuple[int, ...]) -> treat as List[int]
+                    args_of_tuple = get_args(ann)
+                    if len(args_of_tuple) == 2 and args_of_tuple[1] is Ellipsis:
+                        ann = list[args_of_tuple[0]]  # type: ignore
+                    else:
+                        ann = list[Any]
                 else:
-                    ann = list[Any]
-            else:
-                # If user wrote *args: int, treat as List[int]
-                ann = list[ann]  # type: ignore
+                    # If user wrote *args: int, treat as List[int]
+                    ann = list[ann]  # type: ignore
 
-            # Default factory to empty list
-            fields[name] = (
-                ann,
-                Field(default_factory=list, description=field_description),
-            )
+                # Default factory to empty list
+                fields[name] = (
+                    ann,
+                    Field(default_factory=list, description=field_description),
+                )
 
-        elif param.kind == param.VAR_KEYWORD:
-            # **kwargs handling
-            if get_origin(ann) is dict:
-                # e.g. def foo(**kwargs: dict[str, int])
-                dict_args = get_args(ann)
-                if len(dict_args) == 2:
-                    ann = dict[dict_args[0], dict_args[1]]  # type: ignore
+            elif param.kind == param.VAR_KEYWORD:
+                # **kwargs handling
+                if get_origin(ann) is dict:
+                    # e.g. def foo(**kwargs: dict[str, int])
+                    dict_args = get_args(ann)
+                    if len(dict_args) == 2:
+                        ann = dict[dict_args[0], dict_args[1]]  # type: ignore
+                    else:
+                        ann = dict[str, Any]
                 else:
-                    ann = dict[str, Any]
+                    # e.g. def foo(**kwargs: int) -> Dict[str, int]
+                    ann = dict[str, ann]  # type: ignore
+
+                fields[name] = (
+                    ann,
+                    Field(default_factory=dict, description=field_description),
+                )
+
             else:
-                # e.g. def foo(**kwargs: int) -> Dict[str, int]
-                ann = dict[str, ann]  # type: ignore
+                # Normal parameter
+                if default == inspect._empty:
+                    # Required field
+                    fields[name] = (
+                        ann,
+                        Field(..., description=field_description),
+                    )
+                elif isinstance(default, FieldInfo):
+                    # Parameter with a default value that is a Field(...)
+                    fields[name] = (
+                        ann,
+                        FieldInfo.merge_field_infos(
+                            default, description=field_description or default.description
+                        ),
+                    )
+                else:
+                    # Parameter with a default value
+                    fields[name] = (
+                        ann,
+                        Field(default=default, description=field_description),
+                    )
 
-            fields[name] = (
-                ann,
-                Field(default_factory=dict, description=field_description),
-            )
-
-        else:
-            # Normal parameter
-            if default == inspect._empty:
-                # Required field
-                fields[name] = (
-                    ann,
-                    Field(..., description=field_description),
-                )
-            elif isinstance(default, FieldInfo):
-                # Parameter with a default value that is a Field(...)
-                fields[name] = (
-                    ann,
-                    FieldInfo.merge_field_infos(
-                        default, description=field_description or default.description
-                    ),
-                )
-            else:
-                # Parameter with a default value
-                fields[name] = (
-                    ann,
-                    Field(default=default, description=field_description),
-                )
-
-    # 3. Dynamically build a Pydantic model
-    dynamic_model = create_model(f"{func_name}_args", __base__=BaseModel, **fields)
+        # 3. Dynamically build a Pydantic model
+        dynamic_model = create_model(f"{func_name}_args", __base__=BaseModel, **fields)
+        _MODEL_CACHE[cache_key] = dynamic_model
 
     # 4. Build JSON schema from that model
     json_schema = dynamic_model.model_json_schema()
