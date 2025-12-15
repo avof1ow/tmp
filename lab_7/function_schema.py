@@ -105,39 +105,34 @@ _GOOGLE_PATTERNS = [re.compile(r"^(Args|Arguments):", re.MULTILINE),
 # As of Feb 2025, the automatic style detection in griffe is an Insiders feature. This
 # code approximates it.
 def _detect_docstring_style(doc: str) -> DocstringStyle:
-    scores: dict[DocstringStyle, int] = {"sphinx": 0, "numpy": 0, "google": 0}
-
-    # Sphinx style detection: look for :param, :type, :return:, and :rtype:
-    for pattern in _SPHINX_PATTERNS:
-        if pattern.search(doc):
-            scores["sphinx"] += 1
-
-    # Numpy style detection: look for headers like 'Parameters', 'Returns', or 'Yields' followed by
-    # a dashed underline
-    for pattern in _NUMPY_PATTERNS:
-        if pattern.search(doc):
-            scores["numpy"] += 1
-
-    # Google style detection: look for section headers with a trailing colon
-    for pattern in _GOOGLE_PATTERNS:
-        if pattern.search(doc):
-            scores["google"] += 1
-
-    max_score = max(scores.values())
-    if max_score == 0:
+    """Оптимизированная детекция стиля docstring."""
+    # Быстрая проверка: если строка пустая или короткая
+    if not doc or len(doc) < 10:
         return "google"
 
-    # Priority order: sphinx > numpy > google in case of tie
-    if scores["sphinx"] == max_score:
+    # Быстрый поиск по префиксам
+    if doc.startswith(":param") or doc.startswith(":type") or ":return:" in doc[:100]:
         return "sphinx"
-    if scores["numpy"] == max_score:
-        return "numpy"
+
+    # Поиск шаблонов с помощью предкомпилированных regex
+    for pattern in _SPHINX_PATTERNS:
+        if pattern.search(doc):
+            return "sphinx"
+
+    for pattern in _NUMPY_PATTERNS:
+        if pattern.search(doc):
+            return "numpy"
+
+    for pattern in _GOOGLE_PATTERNS:
+        if pattern.search(doc):
+            return "google"
+
     return "google"
 
 
 @contextlib.contextmanager
 def _suppress_griffe_logging():
-    # Suppresses warnings about missing annotations for params
+    """Контекстный менеджер для подавления логов griffe."""
     logger = logging.getLogger("griffe")
     previous_level = logger.getEffectiveLevel()
     logger.setLevel(logging.ERROR)
@@ -148,25 +143,29 @@ def _suppress_griffe_logging():
 
 
 # Кэшированные версии часто используемых функций
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=256)  # Увеличили размер кэша
 def _cached_signature(func: Callable[..., Any]) -> inspect.Signature:
     """Кэшированная версия inspect.signature."""
-    return inspect.signature(func)
+    return inspect.signature(func, eval_str=True)  # Добавили eval_str для лучшей поддержки
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=256)
 def _cached_get_type_hints(func: Callable[..., Any]) -> dict[str, Any]:
     """Кэшированная версия get_type_hints."""
-    return get_type_hints(func, include_extras=True)
+    try:
+        return get_type_hints(func, include_extras=True)
+    except (NameError, TypeError):
+        # Если есть проблемы с аннотациями, возвращаем пустой dict
+        return {}
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=256)
 def _cached_getdoc(func: Callable[..., Any]) -> str | None:
     """Кэшированная версия inspect.getdoc."""
     return inspect.getdoc(func)
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=256)
 def generate_func_documentation(
         func: Callable[..., Any], style: DocstringStyle | None = None
 ) -> FuncDocumentation:
@@ -210,63 +209,64 @@ def generate_func_documentation(
 
 def _strip_annotated(annotation: Any) -> tuple[Any, tuple[Any, ...]]:
     """Returns the underlying annotation and any metadata from typing.Annotated."""
-    metadata: tuple[Any, ...] = ()
-    ann = annotation
+    # Быстрая проверка: если это не Annotated, возвращаем как есть
+    origin = get_origin(annotation)
+    if origin is not Annotated:
+        return annotation, ()
 
-    # Быстрая проверка для Annotated
-    if get_origin(ann) is not Annotated:
-        return ann, metadata
-
-    # Извлекаем все метаданные за один проход
-    args = get_args(ann)
+    args = get_args(annotation)
     if not args:
-        return ann, metadata
+        return annotation, ()
 
-    # Берем основную аннотацию
-    ann = args[0]
+    # Извлекаем основную аннотацию и метаданные
+    main_annotation = args[0]
+    metadata = args[1:]
 
-    # Собираем все метаданные из всех уровней вложенности
-    current_args = args
-    while get_origin(ann) is Annotated:
-        nested_args = get_args(ann)
+    # Обрабатываем вложенные Annotated
+    while get_origin(main_annotation) is Annotated:
+        nested_args = get_args(main_annotation)
         if not nested_args:
             break
-        ann = nested_args[0]
-        current_args = nested_args
+        main_annotation = nested_args[0]
+        metadata = (*metadata, *nested_args[1:])
 
-    # Теперь собираем все метаданные
-    for i in range(1, len(args)):
-        if isinstance(args[i], tuple):
-            metadata += args[i]
-        else:
-            metadata += (args[i],)
-
-    # Добавляем метаданные из вложенных уровней
-    if current_args != args:
-        for i in range(1, len(current_args)):
-            if isinstance(current_args[i], tuple):
-                metadata += current_args[i]
-            else:
-                metadata += (current_args[i],)
-
-    return ann, metadata
+    return main_annotation, metadata
 
 
 def _extract_description_from_metadata(metadata: tuple[Any, ...]) -> str | None:
     """Extracts a human readable description from Annotated metadata if present."""
-    # Оптимизация: сразу проверяем первый элемент, если он строка
-    if metadata and isinstance(metadata[0], str):
+    if not metadata:
+        return None
+
+    # Проверяем первый элемент
+    if isinstance(metadata[0], str):
         return metadata[0]
 
-    # Если первый не строка, ищем среди остальных
+    # Ищем строку среди остальных элементов
     for item in metadata[1:]:
         if isinstance(item, str):
             return item
+        # Также проверяем Field объекты
+        if isinstance(item, FieldInfo) and item.description:
+            return item.description
+
     return None
 
 
-# Кэш для созданных моделей Pydantic
-_MODEL_CACHE: dict[str, type[BaseModel]] = {}
+# Кэш для созданных моделей Pydantic с LRU политикой
+_MODEL_CACHE: dict[str, tuple[type[BaseModel], dict[str, Any]]] = {}
+_MAX_CACHE_SIZE = 512  # Максимальный размер кэша
+
+
+def _get_cache_key(
+        func_name: str,
+        strict_json_schema: bool,
+        use_docstring_info: bool,
+        docstring_style: str | None
+) -> str:
+    """Создает ключ для кэша моделей."""
+    style_str = docstring_style or "auto"
+    return f"{func_name}|{strict_json_schema}|{use_docstring_info}|{style_str}"
 
 
 def function_schema(
@@ -328,7 +328,8 @@ def function_schema(
                 annotated_param_descs[name] = description
 
     # Быстрое обновление словаря описаний параметров
-    param_descs.update(annotated_param_descs)
+    if annotated_param_descs:
+        param_descs.update(annotated_param_descs)
 
     # Ensure name_override takes precedence even if docstring info is disabled.
     func_name = name_override or (doc_info.name if doc_info else func.__name__)
@@ -366,10 +367,11 @@ def function_schema(
         filtered_params.append((name, param))
 
     # Проверяем, есть ли уже модель в кэше
-    cache_key = f"{func_name}_{strict_json_schema}_{use_docstring_info}_{docstring_style}"
+    cache_key = _get_cache_key(func_name, strict_json_schema, use_docstring_info, docstring_style)
 
     if cache_key in _MODEL_CACHE:
-        dynamic_model = _MODEL_CACHE[cache_key]
+        dynamic_model, cached_json_schema = _MODEL_CACHE[cache_key]
+        json_schema = cached_json_schema
     else:
         # We will collect field definitions for create_model as a dict:
         #   field_name -> (type_annotation, default_value_or_Field(...))
@@ -449,12 +451,20 @@ def function_schema(
 
         # 3. Dynamically build a Pydantic model
         dynamic_model = create_model(f"{func_name}_args", __base__=BaseModel, **fields)
-        _MODEL_CACHE[cache_key] = dynamic_model
 
-    # 4. Build JSON schema from that model
-    json_schema = dynamic_model.model_json_schema()
-    if strict_json_schema:
-        json_schema = ensure_strict_json_schema(json_schema)
+        # 4. Build JSON schema from that model
+        json_schema = dynamic_model.model_json_schema()
+        if strict_json_schema:
+            json_schema = ensure_strict_json_schema(json_schema)
+
+        # Кэшируем модель и схему
+        _MODEL_CACHE[cache_key] = (dynamic_model, json_schema)
+
+        # Очищаем кэш если он слишком большой (LRU политика)
+        if len(_MODEL_CACHE) > _MAX_CACHE_SIZE:
+            # Удаляем первый элемент (самый старый в Python 3.7+)
+            first_key = next(iter(_MODEL_CACHE))
+            del _MODEL_CACHE[first_key]
 
     # 5. Return as a FuncSchema dataclass
     return FuncSchema(
@@ -467,3 +477,26 @@ def function_schema(
         takes_context=takes_context,
         strict_json_schema=strict_json_schema,
     )
+
+
+# Добавляем функцию для очистки кэша (полезно для тестирования)
+def clear_caches():
+    """Очищает все внутренние кэши."""
+    _cached_signature.cache_clear()
+    _cached_get_type_hints.cache_clear()
+    _cached_getdoc.cache_clear()
+    generate_func_documentation.cache_clear()
+    _MODEL_CACHE.clear()
+
+
+# Добавляем функцию для получения статистики кэша
+def get_cache_stats() -> dict[str, Any]:
+    """Возвращает статистику использования кэшей."""
+    return {
+        "signature_cache_size": _cached_signature.cache_info().currsize,
+        "type_hints_cache_size": _cached_get_type_hints.cache_info().currsize,
+        "getdoc_cache_size": _cached_getdoc.cache_info().currsize,
+        "doc_cache_size": generate_func_documentation.cache_info().currsize,
+        "model_cache_size": len(_MODEL_CACHE),
+        "max_model_cache_size": _MAX_CACHE_SIZE,
+    }
