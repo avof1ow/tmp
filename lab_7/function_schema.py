@@ -6,6 +6,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Annotated, Any, Callable, Literal, get_args, get_origin, get_type_hints
+from functools import lru_cache  # Добавлен импорт
 
 from griffe import Docstring, DocstringSectionKind
 from pydantic import BaseModel, Field, create_model
@@ -143,6 +144,19 @@ def _suppress_griffe_logging():
         logger.setLevel(previous_level)
 
 
+# Кэшированные версии часто используемых функций
+@lru_cache(maxsize=128)
+def _cached_signature(func: Callable[..., Any]) -> inspect.Signature:
+    """Кэшированная версия inspect.signature."""
+    return inspect.signature(func)
+
+
+@lru_cache(maxsize=128)
+def _cached_get_type_hints(func: Callable[..., Any]) -> dict[str, Any]:
+    """Кэшированная версия get_type_hints."""
+    return get_type_hints(func, include_extras=True)
+
+
 def generate_func_documentation(
     func: Callable[..., Any], style: DocstringStyle | None = None
 ) -> FuncDocumentation:
@@ -249,7 +263,8 @@ def function_schema(
         doc_info = None
         param_descs = {}
 
-    type_hints_with_extras = get_type_hints(func, include_extras=True)
+    # Используем кэшированную версию get_type_hints
+    type_hints_with_extras = _cached_get_type_hints(func)
     type_hints: dict[str, Any] = {}
     annotated_param_descs: dict[str, str] = {}
 
@@ -271,7 +286,8 @@ def function_schema(
     func_name = name_override or (doc_info.name if doc_info else func.__name__)
 
     # 2. Inspect function signature and get type hints
-    sig = inspect.signature(func)
+    # Используем кэшированную версию signature
+    sig = _cached_signature(func)
     params = list(sig.parameters.items())
     takes_context = False
     filtered_params = []
