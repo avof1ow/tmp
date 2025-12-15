@@ -210,24 +210,56 @@ def generate_func_documentation(
 
 def _strip_annotated(annotation: Any) -> tuple[Any, tuple[Any, ...]]:
     """Returns the underlying annotation and any metadata from typing.Annotated."""
-
     metadata: tuple[Any, ...] = ()
     ann = annotation
 
+    # Быстрая проверка для Annotated
+    if get_origin(ann) is not Annotated:
+        return ann, metadata
+
+    # Извлекаем все метаданные за один проход
+    args = get_args(ann)
+    if not args:
+        return ann, metadata
+
+    # Берем основную аннотацию
+    ann = args[0]
+
+    # Собираем все метаданные из всех уровней вложенности
+    current_args = args
     while get_origin(ann) is Annotated:
-        args = get_args(ann)
-        if not args:
+        nested_args = get_args(ann)
+        if not nested_args:
             break
-        ann = args[0]
-        metadata = (*metadata, *args[1:])
+        ann = nested_args[0]
+        current_args = nested_args
+
+    # Теперь собираем все метаданные
+    for i in range(1, len(args)):
+        if isinstance(args[i], tuple):
+            metadata += args[i]
+        else:
+            metadata += (args[i],)
+
+    # Добавляем метаданные из вложенных уровней
+    if current_args != args:
+        for i in range(1, len(current_args)):
+            if isinstance(current_args[i], tuple):
+                metadata += current_args[i]
+            else:
+                metadata += (current_args[i],)
 
     return ann, metadata
 
 
 def _extract_description_from_metadata(metadata: tuple[Any, ...]) -> str | None:
     """Extracts a human readable description from Annotated metadata if present."""
+    # Оптимизация: сразу проверяем первый элемент, если он строка
+    if metadata and isinstance(metadata[0], str):
+        return metadata[0]
 
-    for item in metadata:
+    # Если первый не строка, ищем среди остальных
+    for item in metadata[1:]:
         if isinstance(item, str):
             return item
     return None
@@ -281,6 +313,7 @@ def function_schema(
     type_hints: dict[str, Any] = {}
     annotated_param_descs: dict[str, str] = {}
 
+    # Оптимизированная обработка аннотаций
     for name, annotation in type_hints_with_extras.items():
         if name == "return":
             continue
@@ -288,12 +321,14 @@ def function_schema(
         stripped_ann, metadata = _strip_annotated(annotation)
         type_hints[name] = stripped_ann
 
-        description = _extract_description_from_metadata(metadata)
-        if description is not None:
-            annotated_param_descs[name] = description
+        # Быстрая проверка на наличие описания в метаданных
+        if metadata:
+            description = _extract_description_from_metadata(metadata)
+            if description is not None:
+                annotated_param_descs[name] = description
 
-    for name, description in annotated_param_descs.items():
-        param_descs.setdefault(name, description)
+    # Быстрое обновление словаря описаний параметров
+    param_descs.update(annotated_param_descs)
 
     # Ensure name_override takes precedence even if docstring info is disabled.
     func_name = name_override or (doc_info.name if doc_info else func.__name__)
