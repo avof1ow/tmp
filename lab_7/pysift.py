@@ -1,5 +1,5 @@
 from numpy import all, any, array, arctan2, cos, sin, exp, dot, log, logical_and, roll, sqrt, stack, trace, \
-    unravel_index, pi, deg2rad, rad2deg, where, zeros, floor, full, nan, isnan, round, float32
+    unravel_index, pi, deg2rad, rad2deg, where, zeros, floor, full, nan, isnan, round, float32, int32, uint8
 from numpy.linalg import det, lstsq, norm
 from cv2 import resize, GaussianBlur, subtract, KeyPoint, INTER_LINEAR, INTER_NEAREST
 from functools import cmp_to_key
@@ -17,6 +17,7 @@ SQRT_2 = sqrt(2.0)
 TWO_PI = 2.0 * pi
 DEG_TO_BIN = 36 / 360.0  # Для быстрого преобразования градусов в бины
 BIN_TO_DEG = 360.0 / 36  # Для быстрого преобразования бинов в градусы
+INV_255 = 1.0 / 255.0  # Для быстрого деления на 255
 
 
 #################
@@ -142,8 +143,7 @@ def findScaleSpaceExtrema(gaussian_images, dog_images, num_intervals, sigma, ima
 
     for octave_index, dog_images_in_octave in enumerate(dog_images):
         # Оптимизация: предварительно вычисляем shape для всех изображений в октаве
-        img_shapes = [img.shape for img in dog_images_in_octave]
-        first_img_shape = img_shapes[0]
+        first_img_shape = dog_images_in_octave[0].shape
 
         # Оптимизация: предварительно вычисляем границы
         row_start = image_border_width
@@ -151,46 +151,51 @@ def findScaleSpaceExtrema(gaussian_images, dog_images, num_intervals, sigma, ima
         col_start = image_border_width
         col_end = first_img_shape[1] - image_border_width
 
-        # Оптимизация: итерируемся по группам по 3 изображения
-        for image_index in range(len(dog_images_in_octave) - 2):
-            first_image = dog_images_in_octave[image_index]
-            second_image = dog_images_in_octave[image_index + 1]
-            third_image = dog_images_in_octave[image_index + 2]
+        # Оптимизация: предварительно вычисляем все изображения в октаве
+        num_dog_images = len(dog_images_in_octave)
 
-            # Векторизация: создаем массив для быстрой проверки пикселей
-            # Создаем окно 3x3 для всех пикселей одновременно
+        # Используем быструю проверку экстремумов для всего блока
+        for image_index in range(1, num_dog_images - 1):
+            prev_img = dog_images_in_octave[image_index - 1]
+            curr_img = dog_images_in_octave[image_index]
+            next_img = dog_images_in_octave[image_index + 1]
+
+            # Быстрая проверка центральных пикселей на превышение порога
             for i in range(row_start, row_end):
-                # Получаем 3D блок данных для быстрой обработки
-                first_block = first_image[i - 1:i + 2, col_start - 1:col_end + 1]
-                second_block = second_image[i - 1:i + 2, col_start - 1:col_end + 1]
-                third_block = third_image[i - 1:i + 2, col_start - 1:col_end + 1]
+                # Получаем строки из всех трех изображений
+                prev_row = prev_img[i - 1:i + 2, col_start - 1:col_end + 1]
+                curr_row = curr_img[i - 1:i + 2, col_start - 1:col_end + 1]
+                next_row = next_img[i - 1:i + 2, col_start - 1:col_end + 1]
 
-                # Центральные пиксели
-                center_pixels = second_image[i, col_start:col_end]
+                # Центральные пиксели текущего изображения
+                center_pixels = curr_img[i, col_start:col_end]
 
-                # Векторизованная проверка на экстремум
+                # Быстрая проверка по порогу
                 for j_offset, center_val in enumerate(center_pixels):
-                    j = col_start + j_offset
                     if abs(center_val) > threshold_val:
-                        # Векторизованная проверка соседей
-                        if isPixelAnExtremumVectorized(
-                                first_block[:, j_offset:j_offset + 3],
-                                second_block[:, j_offset:j_offset + 3],
-                                third_block[:, j_offset:j_offset + 3],
+                        j = col_start + j_offset
+
+                        # Быстрая проверка 3x3x3 окрестности
+                        if isPixelAnExtremumOptimized(
+                                prev_row[:, j_offset:j_offset + 3],
+                                curr_row[:, j_offset:j_offset + 3],
+                                next_row[:, j_offset:j_offset + 3],
                                 center_val
                         ):
-                            localization_result = localizeExtremumViaQuadraticFit(
-                                i, j, image_index + 1, octave_index, num_intervals,
-                                dog_images_in_octave, sigma, contrast_threshold, image_border_width
+                            # Используем оптимизированную локализацию
+                            localization_result = localizeExtremumViaQuadraticFitOptimized(
+                                i, j, image_index, octave_index, num_intervals,
+                                dog_images_in_octave, sigma, contrast_threshold,
+                                image_border_width, threshold_val
                             )
                             if localization_result is not None:
                                 keypoint, localized_image_index = localization_result
                                 keypoints_with_orientations = computeKeypointsWithOrientations(
                                     keypoint, octave_index, gaussian_images[octave_index][localized_image_index]
                                 )
-                                # Оптимизация: используем extend вместо append в цикле
-                                for keypoint_with_orientation in keypoints_with_orientations:
-                                    keypoints.append(keypoint_with_orientation)
+                                # Оптимизация: batch добавление
+                                if keypoints_with_orientations:
+                                    keypoints.extend(keypoints_with_orientations)
 
     return keypoints
 
@@ -217,7 +222,6 @@ def isPixelAnExtremum(first_subimage, second_subimage, third_subimage, threshold
     return False
 
 
-# Новая оптимизированная версия для быстрой проверки
 def isPixelAnExtremumFast(first_slice, second_slice, third_slice, center_value):
     """Optimized version of extremum check"""
     if center_value > 0:
@@ -263,7 +267,6 @@ def isPixelAnExtremumFast(first_slice, second_slice, third_slice, center_value):
     return False
 
 
-# Векторизованная версия проверки экстремума
 def isPixelAnExtremumVectorized(first_slice, second_slice, third_slice, center_value):
     """Vectorized version of extremum check using NumPy operations"""
     if center_value > 0:
@@ -293,6 +296,50 @@ def isPixelAnExtremumVectorized(first_slice, second_slice, third_slice, center_v
             third_slice[2, 0], third_slice[2, 1], third_slice[2, 2]
         ])
         return all(center_value <= neighbors)
+    return False
+
+
+# Оптимизированная проверка экстремума
+def isPixelAnExtremumOptimized(prev_slice, curr_slice, next_slice, center_value):
+    """Highly optimized extremum check with early exits"""
+    if center_value > 0:
+        # Проверяем соседей в текущем слое (быстрее всего)
+        if (center_value < curr_slice[0, 0] or center_value < curr_slice[0, 1] or center_value < curr_slice[0, 2] or
+                center_value < curr_slice[1, 0] or center_value < curr_slice[1, 2] or
+                center_value < curr_slice[2, 0] or center_value < curr_slice[2, 1] or center_value < curr_slice[2, 2]):
+            return False
+
+        # Проверяем соседей в предыдущем слое
+        if (center_value < prev_slice[0, 0] or center_value < prev_slice[0, 1] or center_value < prev_slice[0, 2] or
+                center_value < prev_slice[1, 0] or center_value < prev_slice[1, 1] or center_value < prev_slice[1, 2] or
+                center_value < prev_slice[2, 0] or center_value < prev_slice[2, 1] or center_value < prev_slice[2, 2]):
+            return False
+
+        # Проверяем соседей в следующем слое
+        if (center_value < next_slice[0, 0] or center_value < next_slice[0, 1] or center_value < next_slice[0, 2] or
+                center_value < next_slice[1, 0] or center_value < next_slice[1, 1] or center_value < next_slice[1, 2] or
+                center_value < next_slice[2, 0] or center_value < next_slice[2, 1] or center_value < next_slice[2, 2]):
+            return False
+
+        return True
+    elif center_value < 0:
+        # Аналогично для отрицательных значений
+        if (center_value > curr_slice[0, 0] or center_value > curr_slice[0, 1] or center_value > curr_slice[0, 2] or
+                center_value > curr_slice[1, 0] or center_value > curr_slice[1, 2] or
+                center_value > curr_slice[2, 0] or center_value > curr_slice[2, 1] or center_value > curr_slice[2, 2]):
+            return False
+
+        if (center_value > prev_slice[0, 0] or center_value > prev_slice[0, 1] or center_value > prev_slice[0, 2] or
+                center_value > prev_slice[1, 0] or center_value > prev_slice[1, 1] or center_value > prev_slice[1, 2] or
+                center_value > prev_slice[2, 0] or center_value > prev_slice[2, 1] or center_value > prev_slice[2, 2]):
+            return False
+
+        if (center_value > next_slice[0, 0] or center_value > next_slice[0, 1] or center_value > next_slice[0, 2] or
+                center_value > next_slice[1, 0] or center_value > next_slice[1, 1] or center_value > next_slice[1, 2] or
+                center_value > next_slice[2, 0] or center_value > next_slice[2, 1] or center_value > next_slice[2, 2]):
+            return False
+
+        return True
     return False
 
 
@@ -349,6 +396,113 @@ def localizeExtremumViaQuadraticFit(i, j, image_index, octave_index, num_interva
     return None
 
 
+# Оптимизированная версия локализации экстремума
+def localizeExtremumViaQuadraticFitOptimized(i, j, image_index, octave_index, num_intervals, dog_images_in_octave,
+                                             sigma, contrast_threshold, image_border_width, initial_threshold,
+                                             eigenvalue_ratio=10, num_attempts_until_convergence=5):
+    """Optimized version of extremum localization"""
+    logger.debug('Localizing scale-space extrema (optimized)...')
+
+    image_shape = dog_images_in_octave[0].shape
+    height, width = image_shape
+
+    # Предварительно вычисленные константы
+    contrast_threshold_scaled = contrast_threshold / num_intervals
+    octave_scale_factor = 2 ** octave_index
+
+    for attempt_index in range(num_attempts_until_convergence):
+        # Получаем изображения
+        img_idx = image_index
+        first_image = dog_images_in_octave[img_idx - 1]
+        second_image = dog_images_in_octave[img_idx]
+        third_image = dog_images_in_octave[img_idx + 1]
+
+        # Создаем pixel_cube напрямую с оптимизацией
+        # Используем заранее выделенную память и избегаем лишних операций
+        i_minus_1, i_plus_2 = i - 1, i + 2
+        j_minus_1, j_plus_2 = j - 1, j + 2
+
+        # Быстрое извлечение блоков 3x3
+        block1 = first_image[i_minus_1:i_plus_2, j_minus_1:j_plus_2].astype('float32')
+        block2 = second_image[i_minus_1:i_plus_2, j_minus_1:j_plus_2].astype('float32')
+        block3 = third_image[i_minus_1:i_plus_2, j_minus_1:j_plus_2].astype('float32')
+
+        # Масштабирование и создание куба
+        pixel_cube = stack([block1, block2, block3]) * INV_255
+
+        # Вычисление градиента и гессиана
+        gradient = computeGradientAtCenterPixelOptimized(pixel_cube)
+        hessian = computeHessianAtCenterPixelOptimized(pixel_cube)
+
+        # Решение системы уравнений
+        try:
+            extremum_update = -lstsq(hessian, gradient, rcond=None)[0]
+        except:
+            return None
+
+        # Проверка сходимости
+        if (abs(extremum_update[0]) < 0.5 and
+                abs(extremum_update[1]) < 0.5 and
+                abs(extremum_update[2]) < 0.5):
+            break
+
+        # Обновление координат
+        j_new = j + int(round(extremum_update[0]))
+        i_new = i + int(round(extremum_update[1]))
+        image_index_new = img_idx + int(round(extremum_update[2]))
+
+        # Проверка границ
+        if (i_new < image_border_width or i_new >= height - image_border_width or
+                j_new < image_border_width or j_new >= width - image_border_width or
+                image_index_new < 1 or image_index_new > num_intervals):
+            return None
+
+        i, j, image_index = i_new, j_new, image_index_new
+
+    if attempt_index >= num_attempts_until_convergence - 1:
+        return None
+
+    # Вычисление значения функции в обновленной точке
+    center_value = pixel_cube[1, 1, 1]
+    functionValueAtUpdatedExtremum = center_value + 0.5 * dot(gradient, extremum_update)
+
+    # Проверка контраста
+    if abs(functionValueAtUpdatedExtremum) < contrast_threshold_scaled:
+        return None
+
+    # Проверка отношения собственных значений
+    xy_hessian = hessian[:2, :2]
+    xy_hessian_trace = trace(xy_hessian)
+    xy_hessian_det = det(xy_hessian)
+
+    if xy_hessian_det <= 0:
+        return None
+
+    trace_sq = xy_hessian_trace ** 2
+    if eigenvalue_ratio * trace_sq >= ((eigenvalue_ratio + 1) ** 2) * xy_hessian_det:
+        return None
+
+    # Создание ключевой точки
+    keypoint = KeyPoint()
+
+    # Оптимизация вычисления координат
+    j_final = (j + extremum_update[0]) * octave_scale_factor
+    i_final = (i + extremum_update[1]) * octave_scale_factor
+    keypoint.pt = (j_final, i_final)
+
+    # Оптимизация вычисления октавы
+    scale_offset = int(round((extremum_update[2] + 0.5) * 255))
+    keypoint.octave = (octave_index & 255) | ((image_index & 255) << 8) | ((scale_offset & 255) << 16)
+
+    # Оптимизация вычисления размера
+    scale_exp = (image_index + extremum_update[2]) / float32(num_intervals)
+    keypoint.size = sigma * (2 ** scale_exp) * (2 ** (octave_index + 1))
+
+    keypoint.response = abs(functionValueAtUpdatedExtremum)
+
+    return keypoint, image_index
+
+
 def computeGradientAtCenterPixel(pixel_array):
     """Approximate gradient at center pixel [1, 1, 1] of 3x3x3 array using central difference formula of order O(h^2), where h is the step size
     """
@@ -359,6 +513,20 @@ def computeGradientAtCenterPixel(pixel_array):
     dy = 0.5 * (pixel_array[1, 2, 1] - pixel_array[1, 0, 1])
     ds = 0.5 * (pixel_array[2, 1, 1] - pixel_array[0, 1, 1])
     return array([dx, dy, ds])
+
+
+# Оптимизированная версия вычисления градиента
+def computeGradientAtCenterPixelOptimized(pixel_array):
+    """Optimized gradient computation"""
+    # Используем прямое обращение к элементам массива
+    # dx = 0.5 * (f(x+1) - f(x-1))
+    dx = (pixel_array[1, 1, 2] - pixel_array[1, 1, 0]) * 0.5
+    # dy = 0.5 * (f(y+1) - f(y-1))
+    dy = (pixel_array[1, 2, 1] - pixel_array[1, 0, 1]) * 0.5
+    # ds = 0.5 * (f(s+1) - f(s-1))
+    ds = (pixel_array[2, 1, 1] - pixel_array[0, 1, 1]) * 0.5
+
+    return array([dx, dy, ds], dtype='float32')
 
 
 def computeHessianAtCenterPixel(pixel_array):
@@ -379,6 +547,32 @@ def computeHessianAtCenterPixel(pixel_array):
     return array([[dxx, dxy, dxs],
                   [dxy, dyy, dys],
                   [dxs, dys, dss]])
+
+
+# Оптимизированная версия вычисления гессиана
+def computeHessianAtCenterPixelOptimized(pixel_array):
+    """Optimized Hessian computation"""
+    center = pixel_array[1, 1, 1]
+
+    # Вторые производные
+    dxx = pixel_array[1, 1, 2] - 2.0 * center + pixel_array[1, 1, 0]
+    dyy = pixel_array[1, 2, 1] - 2.0 * center + pixel_array[1, 0, 1]
+    dss = pixel_array[2, 1, 1] - 2.0 * center + pixel_array[0, 1, 1]
+
+    # Смешанные производные
+    dxy = (pixel_array[1, 2, 2] - pixel_array[1, 2, 0] -
+           pixel_array[1, 0, 2] + pixel_array[1, 0, 0]) * 0.25
+
+    dxs = (pixel_array[2, 1, 2] - pixel_array[2, 1, 0] -
+           pixel_array[0, 1, 2] + pixel_array[0, 1, 0]) * 0.25
+
+    dys = (pixel_array[2, 2, 1] - pixel_array[2, 0, 1] -
+           pixel_array[0, 2, 1] + pixel_array[0, 0, 1]) * 0.25
+
+    # Возвращаем симметричную матрицу
+    return array([[dxx, dxy, dxs],
+                  [dxy, dyy, dys],
+                  [dxs, dys, dss]], dtype='float32')
 
 
 #########################
