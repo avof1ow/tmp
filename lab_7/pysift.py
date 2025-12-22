@@ -1,5 +1,5 @@
 from numpy import all, any, array, arctan2, cos, sin, exp, dot, log, logical_and, roll, sqrt, stack, trace, \
-    unravel_index, pi, deg2rad, rad2deg, where, zeros, floor, full, nan, isnan, round, float32, int32, uint8
+    unravel_index, pi, deg2rad, rad2deg, where, zeros, floor, full, nan, isnan, round, float32, int32, uint8, meshgrid
 from numpy.linalg import det, lstsq, norm
 from cv2 import resize, GaussianBlur, subtract, KeyPoint, INTER_LINEAR, INTER_NEAREST
 from functools import cmp_to_key
@@ -15,9 +15,10 @@ float_tolerance = 1e-7
 # Предварительно вычисленные константы для оптимизации
 SQRT_2 = sqrt(2.0)
 TWO_PI = 2.0 * pi
-DEG_TO_BIN = 36 / 360.0  # Для быстрого преобразования градусов в бины
-BIN_TO_DEG = 360.0 / 36  # Для быстрого преобразования бинов в градусы
-INV_255 = 1.0 / 255.0  # Для быстрого деления на 255
+DEG_TO_BIN = 36 / 360.0
+BIN_TO_DEG = 360.0 / 36
+INV_255 = 1.0 / 255.0
+HIST_SMOOTH_COEFFS = array([1, 4, 6, 4, 1]) / 16.0  # Коэффициенты сглаживания гистограммы
 
 
 #################
@@ -36,7 +37,7 @@ def computeKeypointsAndDescriptors(image, sigma=1.6, num_intervals=3, assumed_bl
     keypoints = findScaleSpaceExtrema(gaussian_images, dog_images, num_intervals, sigma, image_border_width)
     keypoints = removeDuplicateKeypoints(keypoints)
     keypoints = convertKeypointsToInputImageSize(keypoints)
-    descriptors = generateDescriptors(keypoints, gaussian_images)
+    descriptors = generateDescriptorsOptimized(keypoints, gaussian_images)
     return keypoints, descriptors
 
 
@@ -49,7 +50,6 @@ def generateBaseImage(image, sigma, assumed_blur):
     """
     logger.debug('Generating base image...')
     image = resize(image, (0, 0), fx=2, fy=2, interpolation=INTER_LINEAR)
-    # Оптимизация: предварительный расчет
     assumed_blur_sq = (2 * assumed_blur) ** 2
     sigma_diff_sq = max((sigma ** 2) - assumed_blur_sq, 0.01)
     sigma_diff = sqrt(sigma_diff_sq)
@@ -71,7 +71,6 @@ def generateGaussianKernels(sigma, num_intervals):
     gaussian_kernels = zeros(num_images_per_octave)
     gaussian_kernels[0] = sigma
 
-    # Оптимизация: предварительный расчет k_powers
     k_powers = [k ** i for i in range(num_images_per_octave)]
 
     for image_index in range(1, num_images_per_octave):
@@ -87,14 +86,12 @@ def generateGaussianImages(image, num_octaves, gaussian_kernels):
     logger.debug('Generating Gaussian images...')
     gaussian_images = []
 
-    # Оптимизация: заранее вычисляем размеры для всех октав
     current_image = image
 
     for octave_index in range(num_octaves):
         gaussian_images_in_octave = []
         gaussian_images_in_octave.append(current_image)
 
-        # Оптимизация: итерация по срезам для избежания лишних проверок
         kernels_to_apply = gaussian_kernels[1:]
         for gaussian_kernel in kernels_to_apply:
             current_image = GaussianBlur(current_image, (0, 0), sigmaX=gaussian_kernel, sigmaY=gaussian_kernel)
@@ -102,7 +99,6 @@ def generateGaussianImages(image, num_octaves, gaussian_kernels):
 
         gaussian_images.append(gaussian_images_in_octave)
 
-        # Оптимизация: избегаем лишних вызовов shape
         if octave_index < num_octaves - 1:
             octave_base = gaussian_images_in_octave[-3]
             h, w = octave_base.shape[:2]
@@ -119,7 +115,6 @@ def generateDoGImages(gaussian_images):
 
     for gaussian_images_in_octave in gaussian_images:
         dog_images_in_octave = []
-        # Оптимизация: используем enumerate и предварительно вычисляем длину
         num_images = len(gaussian_images_in_octave)
         for i in range(num_images - 1):
             dog_images_in_octave.append(subtract(gaussian_images_in_octave[i + 1], gaussian_images_in_octave[i]))
@@ -137,52 +132,41 @@ def findScaleSpaceExtrema(gaussian_images, dog_images, num_intervals, sigma, ima
     """Find pixel positions of all scale-space extrema in the image pyramid
     """
     logger.debug('Finding scale-space extrema...')
-    # Оптимизация: предварительный расчет threshold
     threshold_val = floor(0.5 * contrast_threshold / num_intervals * 255)
     keypoints = []
 
     for octave_index, dog_images_in_octave in enumerate(dog_images):
-        # Оптимизация: предварительно вычисляем shape для всех изображений в октаве
         first_img_shape = dog_images_in_octave[0].shape
 
-        # Оптимизация: предварительно вычисляем границы
         row_start = image_border_width
         row_end = first_img_shape[0] - image_border_width
         col_start = image_border_width
         col_end = first_img_shape[1] - image_border_width
 
-        # Оптимизация: предварительно вычисляем все изображения в октаве
         num_dog_images = len(dog_images_in_octave)
 
-        # Используем быструю проверку экстремумов для всего блока
         for image_index in range(1, num_dog_images - 1):
             prev_img = dog_images_in_octave[image_index - 1]
             curr_img = dog_images_in_octave[image_index]
             next_img = dog_images_in_octave[image_index + 1]
 
-            # Быстрая проверка центральных пикселей на превышение порога
             for i in range(row_start, row_end):
-                # Получаем строки из всех трех изображений
                 prev_row = prev_img[i - 1:i + 2, col_start - 1:col_end + 1]
                 curr_row = curr_img[i - 1:i + 2, col_start - 1:col_end + 1]
                 next_row = next_img[i - 1:i + 2, col_start - 1:col_end + 1]
 
-                # Центральные пиксели текущего изображения
                 center_pixels = curr_img[i, col_start:col_end]
 
-                # Быстрая проверка по порогу
                 for j_offset, center_val in enumerate(center_pixels):
                     if abs(center_val) > threshold_val:
                         j = col_start + j_offset
 
-                        # Быстрая проверка 3x3x3 окрестности
                         if isPixelAnExtremumOptimized(
                                 prev_row[:, j_offset:j_offset + 3],
                                 curr_row[:, j_offset:j_offset + 3],
                                 next_row[:, j_offset:j_offset + 3],
                                 center_val
                         ):
-                            # Используем оптимизированную локализацию
                             localization_result = localizeExtremumViaQuadraticFitOptimized(
                                 i, j, image_index, octave_index, num_intervals,
                                 dog_images_in_octave, sigma, contrast_threshold,
@@ -190,132 +174,28 @@ def findScaleSpaceExtrema(gaussian_images, dog_images, num_intervals, sigma, ima
                             )
                             if localization_result is not None:
                                 keypoint, localized_image_index = localization_result
-                                keypoints_with_orientations = computeKeypointsWithOrientations(
+                                keypoints_with_orientations = computeKeypointsWithOrientationsOptimized(
                                     keypoint, octave_index, gaussian_images[octave_index][localized_image_index]
                                 )
-                                # Оптимизация: batch добавление
                                 if keypoints_with_orientations:
                                     keypoints.extend(keypoints_with_orientations)
 
     return keypoints
 
 
-def isPixelAnExtremum(first_subimage, second_subimage, third_subimage, threshold):
-    """Return True if the center element of the 3x3x3 input array is strictly greater than or less than all its neighbors, False otherwise
-    """
-    center_pixel_value = second_subimage[1, 1]
-    if abs(center_pixel_value) > threshold:
-        if center_pixel_value > 0:
-            return all(center_pixel_value >= first_subimage) and \
-                all(center_pixel_value >= third_subimage) and \
-                all(center_pixel_value >= second_subimage[0, :]) and \
-                all(center_pixel_value >= second_subimage[2, :]) and \
-                center_pixel_value >= second_subimage[1, 0] and \
-                center_pixel_value >= second_subimage[1, 2]
-        elif center_pixel_value < 0:
-            return all(center_pixel_value <= first_subimage) and \
-                all(center_pixel_value <= third_subimage) and \
-                all(center_pixel_value <= second_subimage[0, :]) and \
-                all(center_pixel_value <= second_subimage[2, :]) and \
-                center_pixel_value <= second_subimage[1, 0] and \
-                center_pixel_value <= second_subimage[1, 2]
-    return False
-
-
-def isPixelAnExtremumFast(first_slice, second_slice, third_slice, center_value):
-    """Optimized version of extremum check"""
-    if center_value > 0:
-        # Быстрая проверка через any для раннего выхода
-        if (center_value < first_slice[0, 0] or center_value < first_slice[0, 1] or center_value < first_slice[0, 2] or
-                center_value < first_slice[1, 0] or center_value < first_slice[1, 1] or center_value < first_slice[
-                    1, 2] or
-                center_value < first_slice[2, 0] or center_value < first_slice[2, 1] or center_value < first_slice[
-                    2, 2] or
-                center_value < second_slice[0, 0] or center_value < second_slice[0, 1] or center_value < second_slice[
-                    0, 2] or
-                center_value < second_slice[1, 0] or center_value < second_slice[1, 2] or
-                center_value < second_slice[2, 0] or center_value < second_slice[2, 1] or center_value < second_slice[
-                    2, 2] or
-                center_value < third_slice[0, 0] or center_value < third_slice[0, 1] or center_value < third_slice[
-                    0, 2] or
-                center_value < third_slice[1, 0] or center_value < third_slice[1, 1] or center_value < third_slice[
-                    1, 2] or
-                center_value < third_slice[2, 0] or center_value < third_slice[2, 1] or center_value < third_slice[
-                    2, 2]):
-            return False
-        return True
-    elif center_value < 0:
-        # Аналогично для отрицательных значений
-        if (center_value > first_slice[0, 0] or center_value > first_slice[0, 1] or center_value > first_slice[0, 2] or
-                center_value > first_slice[1, 0] or center_value > first_slice[1, 1] or center_value > first_slice[
-                    1, 2] or
-                center_value > first_slice[2, 0] or center_value > first_slice[2, 1] or center_value > first_slice[
-                    2, 2] or
-                center_value > second_slice[0, 0] or center_value > second_slice[0, 1] or center_value > second_slice[
-                    0, 2] or
-                center_value > second_slice[1, 0] or center_value > second_slice[1, 2] or
-                center_value > second_slice[2, 0] or center_value > second_slice[2, 1] or center_value > second_slice[
-                    2, 2] or
-                center_value > third_slice[0, 0] or center_value > third_slice[0, 1] or center_value > third_slice[
-                    0, 2] or
-                center_value > third_slice[1, 0] or center_value > third_slice[1, 1] or center_value > third_slice[
-                    1, 2] or
-                center_value > third_slice[2, 0] or center_value > third_slice[2, 1] or center_value > third_slice[
-                    2, 2]):
-            return False
-        return True
-    return False
-
-
-def isPixelAnExtremumVectorized(first_slice, second_slice, third_slice, center_value):
-    """Vectorized version of extremum check using NumPy operations"""
-    if center_value > 0:
-        # Объединяем все соседние значения в один массив для быстрой проверки
-        neighbors = array([
-            first_slice[0, 0], first_slice[0, 1], first_slice[0, 2],
-            first_slice[1, 0], first_slice[1, 1], first_slice[1, 2],
-            first_slice[2, 0], first_slice[2, 1], first_slice[2, 2],
-            second_slice[0, 0], second_slice[0, 1], second_slice[0, 2],
-            second_slice[1, 0], second_slice[1, 2],
-            second_slice[2, 0], second_slice[2, 1], second_slice[2, 2],
-            third_slice[0, 0], third_slice[0, 1], third_slice[0, 2],
-            third_slice[1, 0], third_slice[1, 1], third_slice[1, 2],
-            third_slice[2, 0], third_slice[2, 1], third_slice[2, 2]
-        ])
-        return all(center_value >= neighbors)
-    elif center_value < 0:
-        neighbors = array([
-            first_slice[0, 0], first_slice[0, 1], first_slice[0, 2],
-            first_slice[1, 0], first_slice[1, 1], first_slice[1, 2],
-            first_slice[2, 0], first_slice[2, 1], first_slice[2, 2],
-            second_slice[0, 0], second_slice[0, 1], second_slice[0, 2],
-            second_slice[1, 0], second_slice[1, 2],
-            second_slice[2, 0], second_slice[2, 1], second_slice[2, 2],
-            third_slice[0, 0], third_slice[0, 1], third_slice[0, 2],
-            third_slice[1, 0], third_slice[1, 1], third_slice[1, 2],
-            third_slice[2, 0], third_slice[2, 1], third_slice[2, 2]
-        ])
-        return all(center_value <= neighbors)
-    return False
-
-
-# Оптимизированная проверка экстремума
 def isPixelAnExtremumOptimized(prev_slice, curr_slice, next_slice, center_value):
     """Highly optimized extremum check with early exits"""
     if center_value > 0:
-        # Проверяем соседей в текущем слое (быстрее всего)
         if (center_value < curr_slice[0, 0] or center_value < curr_slice[0, 1] or center_value < curr_slice[0, 2] or
                 center_value < curr_slice[1, 0] or center_value < curr_slice[1, 2] or
                 center_value < curr_slice[2, 0] or center_value < curr_slice[2, 1] or center_value < curr_slice[2, 2]):
             return False
 
-        # Проверяем соседей в предыдущем слое
         if (center_value < prev_slice[0, 0] or center_value < prev_slice[0, 1] or center_value < prev_slice[0, 2] or
                 center_value < prev_slice[1, 0] or center_value < prev_slice[1, 1] or center_value < prev_slice[1, 2] or
                 center_value < prev_slice[2, 0] or center_value < prev_slice[2, 1] or center_value < prev_slice[2, 2]):
             return False
 
-        # Проверяем соседей в следующем слое
         if (center_value < next_slice[0, 0] or center_value < next_slice[0, 1] or center_value < next_slice[0, 2] or
                 center_value < next_slice[1, 0] or center_value < next_slice[1, 1] or center_value < next_slice[1, 2] or
                 center_value < next_slice[2, 0] or center_value < next_slice[2, 1] or center_value < next_slice[2, 2]):
@@ -323,7 +203,6 @@ def isPixelAnExtremumOptimized(prev_slice, curr_slice, next_slice, center_value)
 
         return True
     elif center_value < 0:
-        # Аналогично для отрицательных значений
         if (center_value > curr_slice[0, 0] or center_value > curr_slice[0, 1] or center_value > curr_slice[0, 2] or
                 center_value > curr_slice[1, 0] or center_value > curr_slice[1, 2] or
                 center_value > curr_slice[2, 0] or center_value > curr_slice[2, 1] or center_value > curr_slice[2, 2]):
@@ -343,60 +222,6 @@ def isPixelAnExtremumOptimized(prev_slice, curr_slice, next_slice, center_value)
     return False
 
 
-def localizeExtremumViaQuadraticFit(i, j, image_index, octave_index, num_intervals, dog_images_in_octave, sigma,
-                                    contrast_threshold, image_border_width, eigenvalue_ratio=10,
-                                    num_attempts_until_convergence=5):
-    """Iteratively refine pixel positions of scale-space extrema via quadratic fit around each extremum's neighbors
-    """
-    logger.debug('Localizing scale-space extrema...')
-    extremum_is_outside_image = False
-    image_shape = dog_images_in_octave[0].shape
-    for attempt_index in range(num_attempts_until_convergence):
-        # need to convert from uint8 to float32 to compute derivatives and need to rescale pixel values to [0, 1] to apply Lowe's thresholds
-        first_image, second_image, third_image = dog_images_in_octave[image_index - 1:image_index + 2]
-        pixel_cube = stack([first_image[i - 1:i + 2, j - 1:j + 2],
-                            second_image[i - 1:i + 2, j - 1:j + 2],
-                            third_image[i - 1:i + 2, j - 1:j + 2]]).astype('float32') / 255.
-        gradient = computeGradientAtCenterPixel(pixel_cube)
-        hessian = computeHessianAtCenterPixel(pixel_cube)
-        extremum_update = -lstsq(hessian, gradient, rcond=None)[0]
-        if abs(extremum_update[0]) < 0.5 and abs(extremum_update[1]) < 0.5 and abs(extremum_update[2]) < 0.5:
-            break
-        j += int(round(extremum_update[0]))
-        i += int(round(extremum_update[1]))
-        image_index += int(round(extremum_update[2]))
-        # make sure the new pixel_cube will lie entirely within the image
-        if i < image_border_width or i >= image_shape[0] - image_border_width or j < image_border_width or j >= \
-                image_shape[1] - image_border_width or image_index < 1 or image_index > num_intervals:
-            extremum_is_outside_image = True
-            break
-    if extremum_is_outside_image:
-        logger.debug('Updated extremum moved outside of image before reaching convergence. Skipping...')
-        return None
-    if attempt_index >= num_attempts_until_convergence - 1:
-        logger.debug('Exceeded maximum number of attempts without reaching convergence for this extremum. Skipping...')
-        return None
-    functionValueAtUpdatedExtremum = pixel_cube[1, 1, 1] + 0.5 * dot(gradient, extremum_update)
-    if abs(functionValueAtUpdatedExtremum) * num_intervals >= contrast_threshold:
-        xy_hessian = hessian[:2, :2]
-        xy_hessian_trace = trace(xy_hessian)
-        xy_hessian_det = det(xy_hessian)
-        if xy_hessian_det > 0 and eigenvalue_ratio * (xy_hessian_trace ** 2) < (
-                (eigenvalue_ratio + 1) ** 2) * xy_hessian_det:
-            # Contrast check passed -- construct and return OpenCV KeyPoint object
-            keypoint = KeyPoint()
-            keypoint.pt = ((j + extremum_update[0]) * (2 ** octave_index),
-                           (i + extremum_update[1]) * (2 ** octave_index))
-            keypoint.octave = octave_index + image_index * (2 ** 8) + int(round((extremum_update[2] + 0.5) * 255)) * (
-                        2 ** 16)
-            keypoint.size = sigma * (2 ** ((image_index + extremum_update[2]) / float32(num_intervals))) * (
-                        2 ** (octave_index + 1))  # octave_index + 1 because the input image was doubled
-            keypoint.response = abs(functionValueAtUpdatedExtremum)
-            return keypoint, image_index
-    return None
-
-
-# Оптимизированная версия локализации экстремума
 def localizeExtremumViaQuadraticFitOptimized(i, j, image_index, octave_index, num_intervals, dog_images_in_octave,
                                              sigma, contrast_threshold, image_border_width, initial_threshold,
                                              eigenvalue_ratio=10, num_attempts_until_convergence=5):
@@ -406,52 +231,41 @@ def localizeExtremumViaQuadraticFitOptimized(i, j, image_index, octave_index, nu
     image_shape = dog_images_in_octave[0].shape
     height, width = image_shape
 
-    # Предварительно вычисленные константы
     contrast_threshold_scaled = contrast_threshold / num_intervals
     octave_scale_factor = 2 ** octave_index
 
     for attempt_index in range(num_attempts_until_convergence):
-        # Получаем изображения
         img_idx = image_index
         first_image = dog_images_in_octave[img_idx - 1]
         second_image = dog_images_in_octave[img_idx]
         third_image = dog_images_in_octave[img_idx + 1]
 
-        # Создаем pixel_cube напрямую с оптимизацией
-        # Используем заранее выделенную память и избегаем лишних операций
         i_minus_1, i_plus_2 = i - 1, i + 2
         j_minus_1, j_plus_2 = j - 1, j + 2
 
-        # Быстрое извлечение блоков 3x3
         block1 = first_image[i_minus_1:i_plus_2, j_minus_1:j_plus_2].astype('float32')
         block2 = second_image[i_minus_1:i_plus_2, j_minus_1:j_plus_2].astype('float32')
         block3 = third_image[i_minus_1:i_plus_2, j_minus_1:j_plus_2].astype('float32')
 
-        # Масштабирование и создание куба
         pixel_cube = stack([block1, block2, block3]) * INV_255
 
-        # Вычисление градиента и гессиана
         gradient = computeGradientAtCenterPixelOptimized(pixel_cube)
         hessian = computeHessianAtCenterPixelOptimized(pixel_cube)
 
-        # Решение системы уравнений
         try:
             extremum_update = -lstsq(hessian, gradient, rcond=None)[0]
         except:
             return None
 
-        # Проверка сходимости
         if (abs(extremum_update[0]) < 0.5 and
                 abs(extremum_update[1]) < 0.5 and
                 abs(extremum_update[2]) < 0.5):
             break
 
-        # Обновление координат
         j_new = j + int(round(extremum_update[0]))
         i_new = i + int(round(extremum_update[1]))
         image_index_new = img_idx + int(round(extremum_update[2]))
 
-        # Проверка границ
         if (i_new < image_border_width or i_new >= height - image_border_width or
                 j_new < image_border_width or j_new >= width - image_border_width or
                 image_index_new < 1 or image_index_new > num_intervals):
@@ -462,15 +276,12 @@ def localizeExtremumViaQuadraticFitOptimized(i, j, image_index, octave_index, nu
     if attempt_index >= num_attempts_until_convergence - 1:
         return None
 
-    # Вычисление значения функции в обновленной точке
     center_value = pixel_cube[1, 1, 1]
     functionValueAtUpdatedExtremum = center_value + 0.5 * dot(gradient, extremum_update)
 
-    # Проверка контраста
     if abs(functionValueAtUpdatedExtremum) < contrast_threshold_scaled:
         return None
 
-    # Проверка отношения собственных значений
     xy_hessian = hessian[:2, :2]
     xy_hessian_trace = trace(xy_hessian)
     xy_hessian_det = det(xy_hessian)
@@ -482,19 +293,15 @@ def localizeExtremumViaQuadraticFitOptimized(i, j, image_index, octave_index, nu
     if eigenvalue_ratio * trace_sq >= ((eigenvalue_ratio + 1) ** 2) * xy_hessian_det:
         return None
 
-    # Создание ключевой точки
     keypoint = KeyPoint()
 
-    # Оптимизация вычисления координат
     j_final = (j + extremum_update[0]) * octave_scale_factor
     i_final = (i + extremum_update[1]) * octave_scale_factor
     keypoint.pt = (j_final, i_final)
 
-    # Оптимизация вычисления октавы
     scale_offset = int(round((extremum_update[2] + 0.5) * 255))
     keypoint.octave = (octave_index & 255) | ((image_index & 255) << 8) | ((scale_offset & 255) << 16)
 
-    # Оптимизация вычисления размера
     scale_exp = (image_index + extremum_update[2]) / float32(num_intervals)
     keypoint.size = sigma * (2 ** scale_exp) * (2 ** (octave_index + 1))
 
@@ -503,63 +310,23 @@ def localizeExtremumViaQuadraticFitOptimized(i, j, image_index, octave_index, nu
     return keypoint, image_index
 
 
-def computeGradientAtCenterPixel(pixel_array):
-    """Approximate gradient at center pixel [1, 1, 1] of 3x3x3 array using central difference formula of order O(h^2), where h is the step size
-    """
-    # With step size h, the central difference formula of order O(h^2) for f'(x) is (f(x + h) - f(x - h)) / (2 * h)
-    # Here h = 1, so the formula simplifies to f'(x) = (f(x + 1) - f(x - 1)) / 2
-    # NOTE: x corresponds to second array axis, y corresponds to first array axis, and s (scale) corresponds to third array axis
-    dx = 0.5 * (pixel_array[1, 1, 2] - pixel_array[1, 1, 0])
-    dy = 0.5 * (pixel_array[1, 2, 1] - pixel_array[1, 0, 1])
-    ds = 0.5 * (pixel_array[2, 1, 1] - pixel_array[0, 1, 1])
-    return array([dx, dy, ds])
-
-
-# Оптимизированная версия вычисления градиента
 def computeGradientAtCenterPixelOptimized(pixel_array):
     """Optimized gradient computation"""
-    # Используем прямое обращение к элементам массива
-    # dx = 0.5 * (f(x+1) - f(x-1))
     dx = (pixel_array[1, 1, 2] - pixel_array[1, 1, 0]) * 0.5
-    # dy = 0.5 * (f(y+1) - f(y-1))
     dy = (pixel_array[1, 2, 1] - pixel_array[1, 0, 1]) * 0.5
-    # ds = 0.5 * (f(s+1) - f(s-1))
     ds = (pixel_array[2, 1, 1] - pixel_array[0, 1, 1]) * 0.5
 
     return array([dx, dy, ds], dtype='float32')
 
 
-def computeHessianAtCenterPixel(pixel_array):
-    """Approximate Hessian at center pixel [1, 1, 1] of 3x3x3 array using central difference formula of order O(h^2), where h is the step size
-    """
-    # With step size h, the central difference formula of order O(h^2) for f''(x) is (f(x + h) - 2 * f(x) + f(x - h)) / (h ^ 2)
-    # Here h = 1, so the formula simplifies to f''(x) = f(x + 1) - 2 * f(x) + f(x - 1)
-    # With step size h, the central difference formula of order O(h^2) for (d^2) f(x, y) / (dx dy) = (f(x + h, y + h) - f(x + h, y - h) - f(x - h, y + h) + f(x - h, y - h)) / (4 * h ^ 2)
-    # Here h = 1, so the formula simplifies to (d^2) f(x, y) / (dx dy) = (f(x + 1, y + 1) - f(x + 1, y - 1) - f(x - 1, y + 1) + f(x - 1, y - 1)) / 4
-    # NOTE: x corresponds to second array axis, y corresponds to first array axis, and s (scale) corresponds to third array axis
-    center_pixel_value = pixel_array[1, 1, 1]
-    dxx = pixel_array[1, 1, 2] - 2 * center_pixel_value + pixel_array[1, 1, 0]
-    dyy = pixel_array[1, 2, 1] - 2 * center_pixel_value + pixel_array[1, 0, 1]
-    dss = pixel_array[2, 1, 1] - 2 * center_pixel_value + pixel_array[0, 1, 1]
-    dxy = 0.25 * (pixel_array[1, 2, 2] - pixel_array[1, 2, 0] - pixel_array[1, 0, 2] + pixel_array[1, 0, 0])
-    dxs = 0.25 * (pixel_array[2, 1, 2] - pixel_array[2, 1, 0] - pixel_array[0, 1, 2] + pixel_array[0, 1, 0])
-    dys = 0.25 * (pixel_array[2, 2, 1] - pixel_array[2, 0, 1] - pixel_array[0, 2, 1] + pixel_array[0, 0, 1])
-    return array([[dxx, dxy, dxs],
-                  [dxy, dyy, dys],
-                  [dxs, dys, dss]])
-
-
-# Оптимизированная версия вычисления гессиана
 def computeHessianAtCenterPixelOptimized(pixel_array):
     """Optimized Hessian computation"""
     center = pixel_array[1, 1, 1]
 
-    # Вторые производные
     dxx = pixel_array[1, 1, 2] - 2.0 * center + pixel_array[1, 1, 0]
     dyy = pixel_array[1, 2, 1] - 2.0 * center + pixel_array[1, 0, 1]
     dss = pixel_array[2, 1, 1] - 2.0 * center + pixel_array[0, 1, 1]
 
-    # Смешанные производные
     dxy = (pixel_array[1, 2, 2] - pixel_array[1, 2, 0] -
            pixel_array[1, 0, 2] + pixel_array[1, 0, 0]) * 0.25
 
@@ -569,7 +336,6 @@ def computeHessianAtCenterPixelOptimized(pixel_array):
     dys = (pixel_array[2, 2, 1] - pixel_array[2, 0, 1] -
            pixel_array[0, 2, 1] + pixel_array[0, 0, 1]) * 0.25
 
-    # Возвращаем симметричную матрицу
     return array([[dxx, dxy, dxs],
                   [dxy, dyy, dys],
                   [dxs, dys, dss]], dtype='float32')
@@ -579,73 +345,95 @@ def computeHessianAtCenterPixelOptimized(pixel_array):
 # Keypoint orientations #
 #########################
 
-def computeKeypointsWithOrientations(keypoint, octave_index, gaussian_image, radius_factor=3, num_bins=36,
-                                     peak_ratio=0.8, scale_factor=1.5):
-    """Compute orientations for each keypoint
-    """
-    logger.debug('Computing keypoint orientations...')
+def computeKeypointsWithOrientationsOptimized(keypoint, octave_index, gaussian_image, radius_factor=3, num_bins=36,
+                                              peak_ratio=0.8, scale_factor=1.5):
+    """Optimized version for computing keypoint orientations"""
+    logger.debug('Computing keypoint orientations (optimized)...')
     keypoints_with_orientations = []
     image_shape = gaussian_image.shape
 
+    # Предварительные вычисления
     scale = scale_factor * keypoint.size / float32(2 ** (octave_index + 1))
     radius = int(round(radius_factor * scale))
     weight_factor = -0.5 / (scale ** 2)
-    raw_histogram = zeros(num_bins)
-    smooth_histogram = zeros(num_bins)
 
-    # Оптимизация: предварительно вычисляем координаты региона
     base_y = int(round(keypoint.pt[1] / float32(2 ** octave_index)))
     base_x = int(round(keypoint.pt[0] / float32(2 ** octave_index)))
 
-    # Создаем сетку координат для векторизации
-    y_indices = array(range(-radius, radius + 1))
-    x_indices = array(range(-radius, radius + 1))
+    # Определяем границы региона
+    y_min = max(1, base_y - radius)
+    y_max = min(image_shape[0] - 2, base_y + radius)
+    x_min = max(1, base_x - radius)
+    x_max = min(image_shape[1] - 2, base_x + radius)
 
-    # Векторизованный расчет градиентов
-    for i in y_indices:
-        region_y = base_y + i
-        if 0 < region_y < image_shape[0] - 1:
-            # Получаем строку изображения для быстрого доступа
-            row_above = gaussian_image[region_y - 1, base_x - radius:base_x + radius + 1]
-            row_center = gaussian_image[region_y, base_x - radius:base_x + radius + 1]
-            row_below = gaussian_image[region_y + 1, base_x - radius:base_x + radius + 1]
+    if y_min >= y_max or x_min >= x_max:
+        return keypoints_with_orientations
 
-            for j_offset, j in enumerate(x_indices):
-                region_x = base_x + j
-                if 0 < region_x < image_shape[1] - 1:
-                    dx = row_center[j_offset + 1] - row_center[j_offset - 1]
-                    dy = row_above[j_offset] - row_below[j_offset]
-                    gradient_magnitude = sqrt(dx * dx + dy * dy)
-                    gradient_orientation = rad2deg(arctan2(dy, dx))
-                    weight = exp(weight_factor * (i ** 2 + j ** 2))
-                    histogram_index = int(round(gradient_orientation * DEG_TO_BIN))
-                    raw_histogram[histogram_index % num_bins] += weight * gradient_magnitude
+    # Вычисляем градиенты для всего региона сразу
+    region_height = y_max - y_min + 1
+    region_width = x_max - x_min + 1
 
-    # Векторизованное сглаживание гистограммы
+    # Получаем регион изображения
+    region = gaussian_image[y_min - 1:y_max + 2, x_min - 1:x_max + 2]
+
+    # Вычисляем градиенты через срезы
+    dx = region[1:region_height + 1, 2:region_width + 2] - region[1:region_height + 1, 0:region_width]
+    dy = region[0:region_height, 1:region_width + 1] - region[2:region_height + 2, 1:region_width + 1]
+
+    # Вычисляем магнитуду и ориентацию
+    gradient_magnitude = sqrt(dx * dx + dy * dy)
+    gradient_orientation = rad2deg(arctan2(dy, dx))
+
+    # Создаем гистограмму
+    raw_histogram = zeros(num_bins)
+
+    # Заполняем гистограмму
+    for i in range(region_height):
+        for j in range(region_width):
+            y_offset = (y_min + i) - base_y
+            x_offset = (x_min + j) - base_x
+
+            weight = exp(weight_factor * (y_offset ** 2 + x_offset ** 2))
+            histogram_index = int(round(gradient_orientation[i, j] * DEG_TO_BIN)) % num_bins
+            raw_histogram[histogram_index] += weight * gradient_magnitude[i, j]
+
+    # Быстрое сглаживание гистограммы
+    smooth_histogram = zeros(num_bins)
     for n in range(num_bins):
-        smooth_histogram[n] = (6 * raw_histogram[n] +
-                               4 * (raw_histogram[(n - 1) % num_bins] + raw_histogram[(n + 1) % num_bins]) +
-                               raw_histogram[(n - 2) % num_bins] + raw_histogram[(n + 2) % num_bins]) / 16.
+        smooth_histogram[n] = (
+                HIST_SMOOTH_COEFFS[0] * raw_histogram[(n - 2) % num_bins] +
+                HIST_SMOOTH_COEFFS[1] * raw_histogram[(n - 1) % num_bins] +
+                HIST_SMOOTH_COEFFS[2] * raw_histogram[n] +
+                HIST_SMOOTH_COEFFS[3] * raw_histogram[(n + 1) % num_bins] +
+                HIST_SMOOTH_COEFFS[4] * raw_histogram[(n + 2) % num_bins]
+        )
 
-    orientation_max = max(smooth_histogram)
+    # Находим пики
+    orientation_max = smooth_histogram.max()
+    if orientation_max < float_tolerance:
+        return keypoints_with_orientations
 
-    # Векторизованное нахождение пиков
     shifted_left = roll(smooth_histogram, 1)
     shifted_right = roll(smooth_histogram, -1)
     orientation_peaks = where(logical_and(smooth_histogram > shifted_left,
                                           smooth_histogram > shifted_right))[0]
 
+    peak_threshold = peak_ratio * orientation_max
+
     for peak_index in orientation_peaks:
         peak_value = smooth_histogram[peak_index]
-        if peak_value >= peak_ratio * orientation_max:
-            # Quadratic peak interpolation
+        if peak_value >= peak_threshold:
+            # Интерполяция пика
             left_value = smooth_histogram[(peak_index - 1) % num_bins]
             right_value = smooth_histogram[(peak_index + 1) % num_bins]
+
             interpolated_peak_index = (peak_index + 0.5 * (left_value - right_value) /
                                        (left_value - 2 * peak_value + right_value)) % num_bins
+
             orientation = 360. - interpolated_peak_index * BIN_TO_DEG
             if abs(orientation - 360.) < float_tolerance:
                 orientation = 0
+
             new_keypoint = KeyPoint(*keypoint.pt, keypoint.size, orientation,
                                     keypoint.response, keypoint.octave)
             keypoints_with_orientations.append(new_keypoint)
@@ -725,176 +513,162 @@ def unpackOctave(keypoint):
     return octave, layer, scale
 
 
-def generateDescriptors(keypoints, gaussian_images, window_width=4, num_bins=8, scale_multiplier=3,
-                        descriptor_max_value=0.2):
-    """Generate descriptors for each keypoint
-    """
-    logger.debug('Generating descriptors...')
+def generateDescriptorsOptimized(keypoints, gaussian_images, window_width=4, num_bins=8, scale_multiplier=3,
+                                 descriptor_max_value=0.2):
+    """Optimized descriptor generation"""
+    logger.debug('Generating descriptors (optimized)...')
     descriptors = []
 
-    # Предварительно вычисленные константы для ускорения
-    half_window = 0.5 * window_width
-    weight_multiplier_base = -0.5 / ((0.5 * window_width) ** 2)
-    bins_per_degree = num_bins / 360.
+    # Предварительно вычисленные константы
+    half_window = window_width * 0.5
+    weight_multiplier = -2.0 / (window_width ** 2)  # -0.5 / ((0.5 * window_width) ** 2)
+    bins_per_degree = num_bins / 360.0
 
     for keypoint in keypoints:
         octave, layer, scale = unpackOctave(keypoint)
         gaussian_image = gaussian_images[octave + 1, layer]
         num_rows, num_cols = gaussian_image.shape
-        point = round(scale * array(keypoint.pt)).astype('int')
-        angle = 360. - keypoint.angle
+
+        point = (scale * array(keypoint.pt)).round().astype(int32)
+        angle = 360.0 - keypoint.angle
         angle_rad = deg2rad(angle)
-        cos_angle = cos(angle_rad)
-        sin_angle = sin(angle_rad)
+        cos_a = cos(angle_rad)
+        sin_a = sin(angle_rad)
 
-        # Descriptor window size
+        # Размер окна дескриптора
         hist_width = scale_multiplier * 0.5 * scale * keypoint.size
-        half_width = int(round(hist_width * SQRT_2 * (window_width + 1) * 0.5))
-        half_width = int(min(half_width, sqrt(num_rows ** 2 + num_cols ** 2)))
+        half_width = int(min(
+            round(hist_width * SQRT_2 * (window_width + 1) * 0.5),
+            sqrt(num_rows ** 2 + num_cols ** 2)
+        ))
 
-        # Векторизация: создаем сетки координат
-        rows = array(range(-half_width, half_width + 1))
-        cols = array(range(-half_width, half_width + 1))
+        # Определяем границы региона
+        row_min = max(1, point[1] - half_width)
+        row_max = min(num_rows - 2, point[1] + half_width)
+        col_min = max(1, point[0] - half_width)
+        col_max = min(num_cols - 2, point[0] + half_width)
 
-        # Создаем 2D сетки для векторизованных вычислений
-        row_grid, col_grid = meshgrid(rows, cols, indexing='ij')
+        if row_min >= row_max or col_min >= col_max:
+            descriptors.append(zeros(window_width * window_width * num_bins, dtype='float32'))
+            continue
 
-        # Вращенные координаты
-        row_rot = col_grid * sin_angle + row_grid * cos_angle
-        col_rot = col_grid * cos_angle - row_grid * sin_angle
+        # Создаем сетку координат
+        rows = arange(row_min, row_max + 1) - point[1]
+        cols = arange(col_min, col_max + 1) - point[0]
+        col_grid, row_grid = meshgrid(cols, rows)
 
-        # Бин координаты
+        # Вращаем координаты
+        row_rot = col_grid * sin_a + row_grid * cos_a
+        col_rot = col_grid * cos_a - row_grid * sin_a
+
+        # Преобразуем в бины
         row_bin = (row_rot / hist_width) + half_window - 0.5
         col_bin = (col_rot / hist_width) + half_window - 0.5
 
-        # Маска для валидных бинов
+        # Маска валидных бинов
         valid_mask = (row_bin > -1) & (row_bin < window_width) & \
                      (col_bin > -1) & (col_bin < window_width)
 
-        # Векторизованное вычисление градиентов
+        if not valid_mask.any():
+            descriptors.append(zeros(window_width * window_width * num_bins, dtype='float32'))
+            continue
+
+        # Получаем индексы пикселей
         window_rows = point[1] + row_grid
         window_cols = point[0] + col_grid
 
-        # Маска для валидных пикселей
-        pixel_mask = (window_rows > 0) & (window_rows < num_rows - 1) & \
-                     (window_cols > 0) & (window_cols < num_cols - 1)
+        # Вычисляем градиенты для валидных пикселей
+        valid_rows = window_rows[valid_mask].astype(int32)
+        valid_cols = window_cols[valid_mask].astype(int32)
+        valid_row_bin = row_bin[valid_mask]
+        valid_col_bin = col_bin[valid_mask]
 
-        final_mask = valid_mask & pixel_mask
-
-        # Применяем маски
-        valid_rows = window_rows[final_mask].astype(int)
-        valid_cols = window_cols[final_mask].astype(int)
-        valid_row_bin = row_bin[final_mask]
-        valid_col_bin = col_bin[final_mask]
-
-        # Вычисляем градиенты для всех валидных пикселей сразу
-        # Используем срезы для векторизации
+        # Векторизованное вычисление градиентов
         dx = gaussian_image[valid_rows, valid_cols + 1] - gaussian_image[valid_rows, valid_cols - 1]
         dy = gaussian_image[valid_rows - 1, valid_cols] - gaussian_image[valid_rows + 1, valid_cols]
 
         gradient_magnitude = sqrt(dx * dx + dy * dy)
-        gradient_orientation = (rad2deg(arctan2(dy, dx)) % 360)
+        gradient_orientation = (rad2deg(arctan2(dy, dx)) - angle) % 360.0
 
         # Веса
-        weight = exp(weight_multiplier_base * ((valid_row_bin / hist_width) ** 2 +
-                                               (valid_col_bin / hist_width) ** 2))
+        weight = exp(weight_multiplier * ((valid_row_bin / hist_width) ** 2 +
+                                          (valid_col_bin / hist_width) ** 2))
 
         weighted_magnitude = weight * gradient_magnitude
-        orientation_bin = (gradient_orientation - angle) * bins_per_degree
+        orientation_bin = gradient_orientation * bins_per_degree
 
         # Создаем гистограмму
         histogram_tensor = zeros((window_width + 2, window_width + 2, num_bins))
 
-        # Векторизованное распределение по бинам
+        # Быстрое распределение по бинам
         for idx in range(len(valid_row_bin)):
-            row_bin_val = valid_row_bin[idx]
-            col_bin_val = valid_col_bin[idx]
-            magnitude_val = weighted_magnitude[idx]
-            orientation_bin_val = orientation_bin[idx]
+            r_bin, c_bin = valid_row_bin[idx], valid_col_bin[idx]
+            mag = weighted_magnitude[idx]
+            o_bin = orientation_bin[idx]
 
-            # Трилинейная интерполяция
-            row_bin_floor = int(floor(row_bin_val))
-            col_bin_floor = int(floor(col_bin_val))
-            orientation_bin_floor = int(floor(orientation_bin_val))
+            r_floor, c_floor, o_floor = floor([r_bin, c_bin, o_bin]).astype(int32)
+            r_frac, c_frac, o_frac = r_bin - r_floor, c_bin - c_floor, o_bin - o_floor
 
-            row_fraction = row_bin_val - row_bin_floor
-            col_fraction = col_bin_val - col_bin_floor
-            orientation_fraction = orientation_bin_val - orientation_bin_floor
+            # Корректируем бины ориентации
+            if o_floor < 0:
+                o_floor += num_bins
+            elif o_floor >= num_bins:
+                o_floor -= num_bins
 
-            if orientation_bin_floor < 0:
-                orientation_bin_floor += num_bins
-            if orientation_bin_floor >= num_bins:
-                orientation_bin_floor -= num_bins
+            # Вычисляем веса для 8 соседних бинов
+            c0 = mag * (1 - r_frac)
+            c1 = mag * r_frac
 
-            # Вычисление весов для 8 соседних бинов
-            c1 = magnitude_val * row_fraction
-            c0 = magnitude_val * (1 - row_fraction)
-            c11 = c1 * col_fraction
-            c10 = c1 * (1 - col_fraction)
-            c01 = c0 * col_fraction
-            c00 = c0 * (1 - col_fraction)
+            c00 = c0 * (1 - c_frac)
+            c01 = c0 * c_frac
+            c10 = c1 * (1 - c_frac)
+            c11 = c1 * c_frac
 
-            c111 = c11 * orientation_fraction
-            c110 = c11 * (1 - orientation_fraction)
-            c101 = c10 * orientation_fraction
-            c100 = c10 * (1 - orientation_fraction)
-            c011 = c01 * orientation_fraction
-            c010 = c01 * (1 - orientation_fraction)
-            c001 = c00 * orientation_fraction
-            c000 = c00 * (1 - orientation_fraction)
+            c000 = c00 * (1 - o_frac)
+            c001 = c00 * o_frac
+            c010 = c01 * (1 - o_frac)
+            c011 = c01 * o_frac
+            c100 = c10 * (1 - o_frac)
+            c101 = c10 * o_frac
+            c110 = c11 * (1 - o_frac)
+            c111 = c11 * o_frac
 
-            # Распределение по бинам
-            histogram_tensor[row_bin_floor + 1, col_bin_floor + 1, orientation_bin_floor] += c000
-            histogram_tensor[row_bin_floor + 1, col_bin_floor + 1, (orientation_bin_floor + 1) % num_bins] += c001
-            histogram_tensor[row_bin_floor + 1, col_bin_floor + 2, orientation_bin_floor] += c010
-            histogram_tensor[row_bin_floor + 1, col_bin_floor + 2, (orientation_bin_floor + 1) % num_bins] += c011
-            histogram_tensor[row_bin_floor + 2, col_bin_floor + 1, orientation_bin_floor] += c100
-            histogram_tensor[row_bin_floor + 2, col_bin_floor + 1, (orientation_bin_floor + 1) % num_bins] += c101
-            histogram_tensor[row_bin_floor + 2, col_bin_floor + 2, orientation_bin_floor] += c110
-            histogram_tensor[row_bin_floor + 2, col_bin_floor + 2, (orientation_bin_floor + 1) % num_bins] += c111
+            # Распределяем по бинам
+            r_idx, c_idx = r_floor + 1, c_floor + 1
+            o_idx1 = o_floor
+            o_idx2 = (o_floor + 1) % num_bins
 
+            histogram_tensor[r_idx, c_idx, o_idx1] += c000
+            histogram_tensor[r_idx, c_idx, o_idx2] += c001
+            histogram_tensor[r_idx, c_idx + 1, o_idx1] += c010
+            histogram_tensor[r_idx, c_idx + 1, o_idx2] += c011
+            histogram_tensor[r_idx + 1, c_idx, o_idx1] += c100
+            histogram_tensor[r_idx + 1, c_idx, o_idx2] += c101
+            histogram_tensor[r_idx + 1, c_idx + 1, o_idx1] += c110
+            histogram_tensor[r_idx + 1, c_idx + 1, o_idx2] += c111
+
+        # Извлекаем и нормализуем дескриптор
         descriptor_vector = histogram_tensor[1:-1, 1:-1, :].flatten()
 
-        # Нормализация
-        threshold = norm(descriptor_vector) * descriptor_max_value
-        descriptor_vector[descriptor_vector > threshold] = threshold
-        descriptor_vector /= max(norm(descriptor_vector), float_tolerance)
+        norm_val = norm(descriptor_vector)
+        if norm_val > float_tolerance:
+            threshold = norm_val * descriptor_max_value
+            descriptor_vector[descriptor_vector > threshold] = threshold
+            descriptor_vector /= norm(descriptor_vector)
 
-        # Конвертация в uint8
-        descriptor_vector = round(512 * descriptor_vector)
-        descriptor_vector[descriptor_vector < 0] = 0
-        descriptor_vector[descriptor_vector > 255] = 255
+        # Конвертация
+        descriptor_vector = (descriptor_vector * 512).round()
+        descriptor_vector.clip(0, 255, out=descriptor_vector)
 
-        descriptors.append(descriptor_vector)
+        descriptors.append(descriptor_vector.astype('float32'))
 
     return array(descriptors, dtype='float32')
 
 
-# Вспомогательная функция для создания сетки
-def meshgrid(*xi, copy=True, sparse=False, indexing='xy'):
-    """NumPy meshgrid совместимость"""
-    from numpy import mgrid, ogrid, array, ndindex
-    import warnings
-
-    ndim = len(xi)
-
-    if indexing not in ['xy', 'ij']:
-        raise ValueError("Valid values for `indexing` are 'xy' and 'ij'.")
-
-    s0 = (1,) * ndim
-    output = [array(x, copy=copy).reshape(s0[:i] + (-1,) + s0[i + 1:])
-              for i, x in enumerate(xi)]
-
-    if indexing == 'xy' and ndim > 1:
-        # switch first and second axis
-        output[0].shape = (1, -1) + s0[2:]
-        output[1].shape = (-1, 1) + s0[2:]
-
-    if not sparse:
-        # Return the full N-D matrix (not only the 1-D vector)
-        output = [x * y for x, y in zip(output, ogrid)]
-
-    if ndim == 1:
-        return output[0]
-
-    return output
+# Вспомогательные функции
+def arange(start, stop=None, step=1, dtype=None):
+    """Упрощенная версия arange"""
+    if stop is None:
+        stop = start
+        start = 0
+    return array([start + i * step for i in range(int((stop - start) / step))], dtype=dtype)
