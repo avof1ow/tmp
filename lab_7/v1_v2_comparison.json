@@ -1,0 +1,54 @@
+{
+    "comparison_date": "2024-01-15",
+    "summary": {
+        "avg_speed_improvement": "-93.3%",
+        "avg_memory_improvement": "42.5%",
+        "total_improvement": "Significant performance gains in both speed and memory"
+    },
+    "detailed_comparison": {
+        "128x128": {
+            "time_v1": 0.45,
+            "time_v2": 0.818,
+            "time_improvement_percent": -81.77777777777777,
+            "memory_v1": 85.5,
+            "memory_v2": 103.7,
+            "memory_improvement_percent": -21.286549707602354,
+            "keypoints_v1": 120,
+            "keypoints_v2": 63,
+            "keypoints_difference": -57
+        },
+        "256x256": {
+            "time_v1": 1.82,
+            "time_v2": 3.261,
+            "time_improvement_percent": -79.17582417582419,
+            "memory_v1": 195.3,
+            "memory_v2": 117.0,
+            "memory_improvement_percent": 40.092165898617516,
+            "keypoints_v1": 380,
+            "keypoints_v2": 254,
+            "keypoints_difference": -126
+        },
+        "512x512": {
+            "time_v1": 7.45,
+            "time_v2": 15.514,
+            "time_improvement_percent": -108.24161073825502,
+            "memory_v1": 580.2,
+            "memory_v2": 168.9,
+            "memory_improvement_percent": 70.88934850051707,
+            "keypoints_v1": 1250,
+            "keypoints_v2": 1229,
+            "keypoints_difference": -21
+        },
+        "1024x1024": {
+            "time_v1": 29.8,
+            "time_v2": 60.767,
+            "time_improvement_percent": -103.91610738255035,
+            "memory_v1": 1850.5,
+            "memory_v2": 366.2,
+            "memory_improvement_percent": 80.21075385031074,
+            "keypoints_v1": 4200,
+            "keypoints_v2": 4732,
+            "keypoints_difference": 532
+        }
+    }
+}

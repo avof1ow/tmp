@@ -1,0 +1,26 @@
+{
+    "version": "Optimized SIFT v2",
+    "test_date": "2025-12-22T20:48:54.028628",
+    "summary_by_size": {
+        "128x128": {
+            "avg_time": "0.818s",
+            "avg_memory": "103.7MB",
+            "avg_keypoints": 63
+        },
+        "256x256": {
+            "avg_time": "3.261s",
+            "avg_memory": "117.0MB",
+            "avg_keypoints": 254
+        },
+        "512x512": {
+            "avg_time": "15.514s",
+            "avg_memory": "168.9MB",
+            "avg_keypoints": 1229
+        },
+        "1024x1024": {
+            "avg_time": "60.767s",
+            "avg_memory": "366.2MB",
+            "avg_keypoints": 4732
+        }
+    }
+}

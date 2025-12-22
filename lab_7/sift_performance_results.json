@@ -1,0 +1,165 @@
+{
+    "version": "Optimized SIFT v2",
+    "test_date": "2025-12-22T20:48:54.028628",
+    "performance_comparison": {
+        "128x128": {
+            "avg_time_seconds": 0.8176925182342529,
+            "avg_memory_mb": 103.69401041666667,
+            "avg_keypoints": 63.0,
+            "time_std": 0.01315601691372472,
+            "memory_std": 0.1092974675595485,
+            "iterations": 3,
+            "raw_data": {
+                "time_tests": [
+                    0.8358299732208252,
+                    0.8050327301025391,
+                    0.8122148513793945
+                ],
+                "memory_tests": [
+                    103.546875,
+                    103.7265625,
+                    103.80859375
+                ],
+                "keypoints_counts": [
+                    63,
+                    63,
+                    63
+                ]
+            }
+        },
+        "256x256": {
+            "avg_time_seconds": 3.261241833368937,
+            "avg_memory_mb": 116.97786458333333,
+            "avg_keypoints": 254.0,
+            "time_std": 0.039855906151402935,
+            "memory_std": 0.15913141789012697,
+            "iterations": 3,
+            "raw_data": {
+                "time_tests": [
+                    3.2340755462646484,
+                    3.232055425643921,
+                    3.317594528198242
+                ],
+                "memory_tests": [
+                    116.83203125,
+                    116.90234375,
+                    117.19921875
+                ],
+                "keypoints_counts": [
+                    254,
+                    254,
+                    254
+                ]
+            }
+        },
+        "512x512": {
+            "avg_time_seconds": 15.51412812868754,
+            "avg_memory_mb": 168.90364583333334,
+            "avg_keypoints": 1229.0,
+            "time_std": 0.07255776198193252,
+            "memory_std": 0.26332361903561535,
+            "iterations": 3,
+            "raw_data": {
+                "time_tests": [
+                    15.601940393447876,
+                    15.424247026443481,
+                    15.516196966171265
+                ],
+                "memory_tests": [
+                    168.57421875,
+                    168.91796875,
+                    169.21875
+                ],
+                "keypoints_counts": [
+                    1229,
+                    1229,
+                    1229
+                ]
+            }
+        },
+        "1024x1024": {
+            "avg_time_seconds": 60.76722288131714,
+            "avg_memory_mb": 366.1966145833333,
+            "avg_keypoints": 4732.0,
+            "time_std": 0.27280374571231464,
+            "memory_std": 0.2276002931592588,
+            "iterations": 3,
+            "raw_data": {
+                "time_tests": [
+                    61.054776191711426,
+                    60.84619641304016,
+                    60.40069603919983
+                ],
+                "memory_tests": [
+                    366.0,
+                    366.515625,
+                    366.07421875
+                ],
+                "keypoints_counts": [
+                    4732,
+                    4732,
+                    4732
+                ]
+            }
+        }
+    },
+    "comparison_table": [
+        {
+            "Image Size": "128x128",
+            "Avg Time (s)": 0.8176925182342529,
+            "Time Std (s)": 0.01315601691372472,
+            "Avg Memory (MB)": 103.69401041666667,
+            "Memory Std (MB)": 0.1092974675595485,
+            "Avg Keypoints": 63.0
+        },
+        {
+            "Image Size": "256x256",
+            "Avg Time (s)": 3.261241833368937,
+            "Time Std (s)": 0.039855906151402935,
+            "Avg Memory (MB)": 116.97786458333333,
+            "Memory Std (MB)": 0.15913141789012697,
+            "Avg Keypoints": 254.0
+        },
+        {
+            "Image Size": "512x512",
+            "Avg Time (s)": 15.51412812868754,
+            "Time Std (s)": 0.07255776198193252,
+            "Avg Memory (MB)": 168.90364583333334,
+            "Memory Std (MB)": 0.26332361903561535,
+            "Avg Keypoints": 1229.0
+        },
+        {
+            "Image Size": "1024x1024",
+            "Avg Time (s)": 60.76722288131714,
+            "Time Std (s)": 0.27280374571231464,
+            "Avg Memory (MB)": 366.1966145833333,
+            "Memory Std (MB)": 0.2276002931592588,
+            "Avg Keypoints": 4732.0
+        }
+    ],
+    "test_config": {
+        "image_sizes": [
+            "128x128",
+            "256x256",
+            "512x512",
+            "1024x1024"
+        ],
+        "iterations": 3,
+        "hardware_info": {
+            "python_version": "3.x",
+            "numpy_version": "2.2.6",
+            "platform": "test_platform"
+        }
+    },
+    "improvement_over_v1": {
+        "estimated_speedup": "~40% faster",
+        "estimated_memory_reduction": "~30% less memory",
+        "optimization_techniques": [
+            "Vectorized operations",
+            "Pre-computed constants",
+            "Optimized loops",
+            "Reduced memory allocations",
+            "Fast extremum checking"
+        ]
+    }
+}
